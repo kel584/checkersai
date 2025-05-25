@@ -185,19 +185,19 @@ class _GameScreenState extends State<GameScreen> {
       });
     }
   }
-  Future<String?> _showPasswordDialog(BuildContext context) async {
+Future<String?> _showPasswordDialog(BuildContext context) async {
   final TextEditingController passwordController = TextEditingController();
   return showDialog<String>(
     context: context,
-    barrierDismissible: true, // User can tap outside to dismiss, or set to false
+    barrierDismissible: true,
     builder: (BuildContext dialogContext) {
       return AlertDialog(
         title: const Text('Developer AI Access'),
-        content: SingleChildScrollView( // In case keyboard makes it overflow
+        content: SingleChildScrollView(
           child: ListBody(
             children: <Widget>[
-              Text('Enter the developer password to get an AI suggestion.'),
-              SizedBox(height: 10),
+              const Text('Enter the developer password to get an AI suggestion.'),
+              const SizedBox(height: 10),
               TextField(
                 controller: passwordController,
                 obscureText: true,
@@ -205,7 +205,7 @@ class _GameScreenState extends State<GameScreen> {
                   hintText: "Password",
                   border: OutlineInputBorder(),
                 ),
-                autofocus: true,
+                // autofocus: true, // Let's try removing or commenting this out
                 onSubmitted: (_) { // Allow submitting with enter key
                    Navigator.of(dialogContext).pop(passwordController.text);
                 },
@@ -217,13 +217,13 @@ class _GameScreenState extends State<GameScreen> {
           TextButton(
             child: const Text('Cancel'),
             onPressed: () {
-              Navigator.of(dialogContext).pop(null); // Return null if cancelled
+              Navigator.of(dialogContext).pop(null);
             },
           ),
-          ElevatedButton( // Make submit more prominent
+          ElevatedButton(
             child: const Text('Submit'),
             onPressed: () {
-              Navigator.of(dialogContext).pop(passwordController.text); // Return entered text
+              Navigator.of(dialogContext).pop(passwordController.text);
             },
           ),
         ],
