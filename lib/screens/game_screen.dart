@@ -1,5 +1,6 @@
 // lib/screens/game_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/piece_model.dart';
 import '../widgets/board_widget.dart';
@@ -8,6 +9,7 @@ import '../game_rules/game_rules.dart';
 import '../game_rules/standard_checkers_rules.dart';
 import '../game_rules/turkish_checkers_rules.dart';
 import '../game_rules/game_status.dart';
+import '../ai/ai_isolate_helper.dart';
 
 const String _kDevPassword = "checkersdev25";
 class GameScreen extends StatefulWidget {
@@ -26,6 +28,7 @@ class _GameScreenState extends State<GameScreen> {
   BoardPosition? _selectedPiecePosition;
   Set<BoardPosition> _validMoves = {};
   Map<String, int> _boardStateCounts = {};
+  bool _isAiThinking = false;
 
   bool _isGameOver = false;
   PieceType? _winner;
@@ -251,41 +254,54 @@ void _getAISuggestion() {
 }
 void _onAIAssistPressed() async {
   if (_isGameOver) {
-    _resetGame(); // This will also set _isDevAccessGranted to false
+    _resetGame();
     return;
   }
+  if (_isAiThinking) return; // Prevent multiple simultaneous calls
 
-  if (_isDevAccessGranted) {
-    // Access has already been granted for this game session
-    _getAISuggestion();
-  } else {
-    // Access not granted yet, show the password dialog
-    final String? enteredPassword = await _showPasswordDialog(context);
+  setState(() {
+    _isAiThinking = true; // For showing a loading indicator
+    _suggestedMove = null;
+  });
 
-    if (enteredPassword == null || !mounted) {
-      return; // User cancelled or widget is gone
+  final List<List<Piece?>> boardCopyForAI =
+      _boardData.map((row) => List<Piece?>.from(row)).toList();
+
+  final params = AIFindBestMoveParams(
+    rules: _currentRules, // Pass the current rules object
+    board: boardCopyForAI,
+    playerType: _currentPlayer,
+    searchDepth: _ai.searchDepth, // Get from your configured AI instance
+    quiescenceSearchDepth: _ai.quiescenceSearchDepth,
+  );
+
+  try {
+    AIMove? bestMove = await compute(findBestMoveIsolate, params);
+
+    if (!mounted) return;
+    setState(() {
+      _suggestedMove = bestMove;
+      if (bestMove == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text(
+                  "AI (${_currentRules.gameVariantName}) found no moves for $_currentPlayer."),
+              duration: const Duration(seconds: 2)),
+        );
+      }
+    });
+  } catch (e) {
+    print("AI computation error: $e");
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error during AI calculation: $e")),
+      );
     }
-
-    if (enteredPassword == _kDevPassword) {
-      // Password correct
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("Developer AI access granted for this game."),
-            duration: Duration(seconds: 2)),
-      );
+  } finally {
+    if (mounted) {
       setState(() {
-        _isDevAccessGranted = true; // Grant access
+        _isAiThinking = false; // Hide loading indicator
       });
-      _getAISuggestion(); // Proceed to get the first suggestion
-    } else {
-      // Password incorrect
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("Incorrect password."),
-            duration: Duration(seconds: 2)),
-      );
     }
   }
 }
