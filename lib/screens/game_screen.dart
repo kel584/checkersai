@@ -34,6 +34,8 @@ class _GameScreenState extends State<GameScreen> {
   late CheckersAI _ai;
   AIMove? _suggestedMove;
 
+  bool _isBoardFlipped = false; 
+
   @override
   void initState() {
     super.initState();
@@ -288,128 +290,148 @@ void _onAIAssistPressed() async {
   }
 }
 
-  @override
-  Widget build(BuildContext context) {
-    String appBarTitle = _currentRules.gameVariantName;
-    String gameStatusMessage = "";
-    Color appBarColor = Colors.brown[700]!;
-    Color gameStatusMessageColor = Theme.of(context).textTheme.bodyLarge?.color ?? Colors.black;
+  // In _GameScreenState class (lib/screens/game_screen.dart)
 
+@override
+Widget build(BuildContext context) {
+  String appBarTitle = _currentRules.gameVariantName;
+  String gameStatusMessage = "";
+  Color appBarColor = Colors.brown[700]!; // Default color
+  Color gameStatusMessageColor = Theme.of(context).textTheme.bodyLarge?.color ?? Colors.black;
 
-    if (_isGameOver) {
-      if (_winner != null) {
-        appBarTitle = "${_winner.toString().split('.').last.toUpperCase()} Wins! (${_currentRules.gameVariantName})";
-        gameStatusMessage = "${_winner.toString().split('.').last.toUpperCase()} Wins by ${_gameEndReason?.toString().split('.').last ?? 'Unknown'}!";
-        appBarColor = _winner == PieceType.red ? Colors.red[900]! : Colors.black87;
-        gameStatusMessageColor = _winner == PieceType.red ? Colors.red[900]! : Colors.black87;
-      } else { // It's a draw
-        appBarTitle = "Draw! (${_currentRules.gameVariantName})";
-        gameStatusMessage = "Draw by ${_gameEndReason?.toString().split('.').last ?? 'Unknown'}!";
-        appBarColor = Colors.blueGrey[700]!;
-        gameStatusMessageColor = Colors.blueGrey[900]!;
-      }
-    } else {
-      appBarTitle = '${_currentRules.gameVariantName} - ${_currentPlayer.toString().split('.').last.toUpperCase()}\'s Turn';
+  if (_isGameOver) {
+    if (_winner != null) {
+      appBarTitle = "${_winner.toString().split('.').last.toUpperCase()} Wins! (${_currentRules.gameVariantName})";
+      gameStatusMessage = "${_winner.toString().split('.').last.toUpperCase()} Wins by ${_gameEndReason?.toString().split('.').last.replaceAllMapped(RegExp(r'([A-Z])'), (match) => ' ${match.group(1)}').trim() ?? 'Unknown'}!";
+      appBarColor = _winner == PieceType.red ? Colors.red[900]! : Colors.black87;
+      gameStatusMessageColor = _winner == PieceType.red ? Colors.red[900]! : Colors.black87;
+    } else { // It's a draw
+      appBarTitle = "Draw! (${_currentRules.gameVariantName})";
+      // Ensure _gameEndReason is used for specific draw reason
+      gameStatusMessage = "Draw by ${_gameEndReason?.toString().split('.').last.replaceAllMapped(RegExp(r'([A-Z])'), (match) => ' ${match.group(1)}').trim() ?? 'Unknown'}!";
+      appBarColor = Colors.blueGrey[700]!;
+      gameStatusMessageColor = Colors.blueGrey[900]!;
     }
+  } else {
+    appBarTitle = '${_currentRules.gameVariantName} - ${_currentPlayer.toString().split('.').last.toUpperCase()}\'s Turn';
+  }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(appBarTitle),
-        backgroundColor: appBarColor,
-        actions: [
-          if (!_isGameOver) // Optionally hide settings when game is over
-            PopupMenuButton<GameRules>(
-              icon: const Icon(Icons.settings_applications),
-              tooltip: "Change Game Variant",
-              onSelected: (GameRules selectedRules) {
-                if (_currentRules.gameVariantName != selectedRules.gameVariantName) {
-                  _changeGameVariant(selectedRules);
-                }
-              },
-              itemBuilder: (BuildContext context) => <PopupMenuEntry<GameRules>>[
-                PopupMenuItem<GameRules>(
-                  value: StandardCheckersRules(),
-                  child: Text(StandardCheckersRules().gameVariantName),
+  return Scaffold(
+    appBar: AppBar(
+      title: Text(appBarTitle),
+      backgroundColor: appBarColor,
+      actions: <Widget>[
+        IconButton(
+          icon: Icon(_isBoardFlipped ? Icons.flip_camera_android_outlined : Icons.flip_camera_android),
+          tooltip: "Flip Board",
+          onPressed: () {
+            // if (!_isGameOver) { // You can decide if flipping is allowed when game is over
+              setState(() {
+                _isBoardFlipped = !_isBoardFlipped;
+                _selectedPiecePosition = null; // Clear selection when board flips
+                _validMoves = {};
+                _suggestedMove = null;
+              });
+            // }
+          },
+        ),
+        if (!_isGameOver) // Only show variant settings if game is not over
+          PopupMenuButton<GameRules>(
+            icon: const Icon(Icons.settings_applications),
+            tooltip: "Change Game Variant",
+            onSelected: (GameRules selectedRules) {
+              if (_currentRules.gameVariantName != selectedRules.gameVariantName) {
+                _changeGameVariant(selectedRules);
+              }
+            },
+            itemBuilder: (BuildContext context) => <PopupMenuEntry<GameRules>>[
+              PopupMenuItem<GameRules>(
+                value: StandardCheckersRules(),
+                child: Text(StandardCheckersRules().gameVariantName),
+              ),
+              PopupMenuItem<GameRules>(
+                value: TurkishCheckersRules(),
+                child: Text(TurkishCheckersRules().gameVariantName),
+              ),
+              // Add other game rules here as you create them
+            ],
+          ),
+      ],
+    ),
+    body: SafeArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          Expanded(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    double potentialSize = constraints.maxWidth < constraints.maxHeight
+                        ? constraints.maxWidth
+                        : constraints.maxHeight;
+                    // Ensure boardSize is not zero to prevent division by zero in BoardWidget if potentialSize is tiny
+                    double boardSize = (potentialSize > 0) ? potentialSize : 100.0; // Min size 100 if no constraints
+
+                    if (_boardData.isEmpty && !_isGameOver) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+
+                    return BoardWidget(
+                      boardData: _boardData,
+                      boardSize: boardSize,
+                      onSquareTap: _isGameOver ? (r, c) {} : _handleSquareTap, // Disable taps if game is over
+                      selectedPiecePosition: _selectedPiecePosition,
+                      validMoves: _validMoves,
+                      suggestedMoveFrom: _suggestedMove?.from,
+                      suggestedMoveTo: _suggestedMove?.to,
+                      isBoardFlipped: _isBoardFlipped, // Pass the flip state
+                      // Optional: Pass piecesOnDarkSquaresOnly if BoardWidget needs it for visuals
+                      // piecesOnDarkSquaresOnly: _currentRules.piecesOnDarkSquaresOnly,
+                    );
+                  },
                 ),
-                PopupMenuItem<GameRules>(
-                  value: TurkishCheckersRules(),
-                  child: Text(TurkishCheckersRules().gameVariantName),
+              ),
+            ),
+          ),
+          if (_isGameOver)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16.0),
+              child: Text(
+                gameStatusMessage,
+                style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: gameStatusMessageColor),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!_isGameOver)
+                  Text(
+                    "${_currentPlayer.toString().split('.').last.toUpperCase()}'s Turn",
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _currentPlayer == PieceType.red ? Colors.red[700] : Colors.black87),
+                  ),
+                const SizedBox(height: 10),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    textStyle: const TextStyle(fontSize: 16),
+                  ),
+                  onPressed: _onAIAssistPressed, // This handles both AI assist and Play Again
+                  child: Text(_isGameOver ? 'Play Again' : 'Get AI Suggestion'),
                 ),
               ],
-            )
+            ),
+          ),
         ],
       ),
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: <Widget>[
-            Expanded(
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      double potentialSize = constraints.maxWidth < constraints.maxHeight
-                          ? constraints.maxWidth
-                          : constraints.maxHeight;
-                      double boardSize = (potentialSize > 0) ? potentialSize : 0.01;
-
-                      if (_boardData.isEmpty && !_isGameOver) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-
-                      return BoardWidget(
-                        boardData: _boardData,
-                        boardSize: boardSize,
-                        onSquareTap: _isGameOver ? (r, c) {} : _handleSquareTap,
-                        selectedPiecePosition: _selectedPiecePosition,
-                        validMoves: _validMoves,
-                        suggestedMoveFrom: _suggestedMove?.from,
-                        suggestedMoveTo: _suggestedMove?.to,
-                        // piecesOnDarkSquaresOnly: _currentRules.piecesOnDarkSquaresOnly, // Pass this to BoardWidget
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ),
-            if (_isGameOver)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16.0),
-                child: Text(
-                  gameStatusMessage,
-                  style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: gameStatusMessageColor),
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min, // Important for Column in Column
-                children: [
-                  if (!_isGameOver)
-                    Text(
-                      "${_currentPlayer.toString().split('.').last.toUpperCase()}'s Turn",
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _currentPlayer == PieceType.red ? Colors.red[700] : Colors.black87),
-                    ),
-                  const SizedBox(height: 10),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                      textStyle: const TextStyle(fontSize: 16),
-                    ),
-                    onPressed: _onAIAssistPressed,
-                    child: Text(_isGameOver ? 'Play Again' : 'Get AI Suggestion'),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+    ),
+  );
+}
 }
