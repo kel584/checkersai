@@ -87,53 +87,48 @@ class TurkishCheckersRules extends GameRules {
     int r = piecePos.row;
     int c = piecePos.col;
 
-    // Orthogonal directions (Up, Down, Left, Right)
-    const List<List<int>> directions = [[-1, 0], [1, 0], [0, -1], [0, 1]]; 
-
-    if (piece.isKing) { // King (Dama) jump logic
-      for (var dir in directions) {
+    if (piece.isKing) { // King (Dama) jump logic (remains the same as your corrected version)
+      const List<List<int>> kingJumpDirections = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+      for (var dir in kingJumpDirections) {
         BoardPosition? opponentPieceToJumpPos;
         // Scan along the line to find the first piece to potentially jump
-        for (int i = 1; i < 8; i++) { // Max 7 squares to check along a line
+        for (int i = 1; i < 8; i++) {
           int checkRow = r + dir[0] * i;
           int checkCol = c + dir[1] * i;
 
-          if (!_isValidPosition(checkRow, checkCol)) { // Went off board
-            break;
-          }
+          if (!_isValidPosition(checkRow, checkCol)) break;
 
           Piece? encounteredPiece = board[checkRow][checkCol];
-          if (encounteredPiece != null) { // Found a piece
-            if (encounteredPiece.type != piece.type) { // It's an opponent's piece
+          if (encounteredPiece != null) {
+            if (encounteredPiece.type != piece.type) {
               opponentPieceToJumpPos = BoardPosition(checkRow, checkCol);
             }
-            // Whether it's an opponent or friendly, this piece blocks further scanning *for a piece to jump*.
             break;
           }
         }
 
-        // If an opponent piece was found that can be jumped
         if (opponentPieceToJumpPos != null) {
-          // Now, scan *beyond* that opponent piece for all subsequent empty landing squares
           for (int j = 1; j < 8; j++) {
             int landRow = opponentPieceToJumpPos.row + dir[0] * j;
             int landCol = opponentPieceToJumpPos.col + dir[1] * j;
-
-            if (!_isValidPosition(landRow, landCol)) { // Went off board
-              break;
-            }
-
-            if (board[landRow][landCol] == null) { // If the square is empty, it's a valid landing spot
+            if (!_isValidPosition(landRow, landCol)) break;
+            if (board[landRow][landCol] == null) {
               jumps.add(BoardPosition(landRow, landCol));
             } else {
-              // Path for landing is blocked by another piece (friendly or opponent), stop scanning in this direction.
               break;
             }
           }
         }
       }
-    } else { // Man (Taş) jump logic - only over adjacent pieces
-      for (var dir in directions) { // Men also jump orthogonally
+    } else { // Man (Taş) jump logic - MODIFIED FOR NO BACKWARD CAPTURES
+      // piece.moveDirection is -1 for Red (moves up, row decreases), +1 for Black (moves down, row increases)
+      final List<List<int>> manJumpDirections = [
+        [piece.moveDirection, 0], // Forward jump
+        [0, -1],                   // Sideways left jump
+        [0, 1],                    // Sideways right jump
+      ];
+
+      for (var dir in manJumpDirections) {
         int jumpOverRow = r + dir[0];
         int jumpOverCol = c + dir[1];
         int landRow = r + dir[0] * 2;

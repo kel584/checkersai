@@ -25,31 +25,27 @@ class AIMove {
 
 class CheckersAI {
   final GameRules rules;
-  final int searchDepth;
-  final int quiescenceSearchDepth; // Max depth for quiescence search
+  final int searchDepth; // This now becomes the MAX depth for iterative deepening
+  final int quiescenceSearchDepth;
   final Random _random = Random();
 
   CheckersAI({
     required this.rules,
-    this.searchDepth = 3, // Main search depth
-    this.quiescenceSearchDepth = 2, // How many extra plies to look for captures
+    this.searchDepth = 4, // Max depth for iterative deepening (e.g., start with 4-5)
+    this.quiescenceSearchDepth = 2,
   });
 
-  // --- Helper: Generate Successor States ---
-  // Modified to accept 'capturesOnly' flag
   List<MapEntry<AIMove, List<List<Piece?>>>> _getSuccessorStates(
     List<List<Piece?>> board,
     PieceType playerToMove, {
-    bool capturesOnly = false, // New flag
+    bool capturesOnly = false,
   }) {
     List<MapEntry<AIMove, List<List<Piece?>>>> successors = [];
     Map<BoardPosition, Set<BoardPosition>> moveOpportunities;
 
     if (capturesOnly) {
-      // Get only jump moves
-      moveOpportunities = rules.getAllMovesForPlayer(board, playerToMove, true); // true for jumpsOnly
+      moveOpportunities = rules.getAllMovesForPlayer(board, playerToMove, true);
     } else {
-      // Get jumps if mandatory, otherwise regular moves
       moveOpportunities = rules.getAllMovesForPlayer(board, playerToMove, false);
     }
 
@@ -57,14 +53,10 @@ class CheckersAI {
       for (BoardPosition firstToPos in firstStepDestinations) {
         bool isFirstStepAJump = (firstToPos.row - fromPos.row).abs() == 2 ||
                                 (firstToPos.col - fromPos.col).abs() == 2;
-        // If capturesOnly is true, isFirstStepAJump must be true.
-        // If we are in quiescence search and somehow a non-jump move was generated
-        // by rules.getAllMovesForPlayer(..., true), we should skip it.
-        // However, rules.getAllMovesForPlayer(..., true) should only return jumps.
+        
         if (capturesOnly && !isFirstStepAJump) {
-          continue; // Should not happen if rules.getAllMovesForPlayer is correct
+          continue; 
         }
-
 
         List<List<Piece?>> boardAfterSequence = board.map((row) => List<Piece?>.from(row)).toList();
         BoardPosition currentPosOfPieceInAction = fromPos;
@@ -109,69 +101,51 @@ class CheckersAI {
     return successors;
   }
 
-  // --- Quiescence Search ---
   double _quiescenceSearch(List<List<Piece?>> board, int depth, double alpha, double beta, bool isMaximizingPlayer, PieceType aiPlayerType) {
-    // Evaluate the current "stand-pat" score (don't make a capture)
     double standPatScore = rules.evaluateBoardForAI(board, aiPlayerType);
 
     if (isMaximizingPlayer) {
-      if (standPatScore >= beta) {
-        return beta; // Fail-high
-      }
+      if (standPatScore >= beta) return beta;
       alpha = max(alpha, standPatScore);
-    } else { // Minimizing player
-      if (standPatScore <= alpha) {
-        return alpha; // Fail-low
-      }
+    } else {
+      if (standPatScore <= alpha) return alpha;
       beta = min(beta, standPatScore);
     }
 
-    if (depth == 0) { // Quiescence depth limit reached
-      return standPatScore;
-    }
+    if (depth == 0) return standPatScore;
 
     PieceType currentPlayerForNode = isMaximizingPlayer
         ? aiPlayerType
         : (aiPlayerType == PieceType.red ? PieceType.black : PieceType.red);
 
-    // Generate ONLY capture moves for quiescence search
     List<MapEntry<AIMove, List<List<Piece?>>>> captureMovesAndStates =
         _getSuccessorStates(board, currentPlayerForNode, capturesOnly: true);
 
-    if (captureMovesAndStates.isEmpty) {
-      return standPatScore; // Position is quiet, no captures to explore
-    }
+    if (captureMovesAndStates.isEmpty) return standPatScore;
 
     if (isMaximizingPlayer) {
-      double maxEval = standPatScore; // Initialize with stand-pat score
+      double maxEval = standPatScore;
       for (var entry in captureMovesAndStates) {
         double eval = _quiescenceSearch(entry.value, depth - 1, alpha, beta, false, aiPlayerType);
         maxEval = max(maxEval, eval);
         alpha = max(alpha, eval);
-        if (beta <= alpha) {
-          break;
-        }
+        if (beta <= alpha) break;
       }
       return maxEval;
-    } else { // Minimizing player
-      double minEval = standPatScore; // Initialize with stand-pat score
+    } else {
+      double minEval = standPatScore;
       for (var entry in captureMovesAndStates) {
         double eval = _quiescenceSearch(entry.value, depth - 1, alpha, beta, true, aiPlayerType);
         minEval = min(minEval, eval);
         beta = min(beta, eval);
-        if (beta <= alpha) {
-          break;
-        }
+        if (beta <= alpha) break;
       }
       return minEval;
     }
   }
 
-
-  // --- Minimax Algorithm with Alpha-Beta Pruning ---
   double _minimax(List<List<Piece?>> board, int depth, double alpha, double beta, bool isMaximizingPlayer, PieceType aiPlayerType) {
     if (depth == 0) {
-      // Call quiescence search instead of direct evaluation
       return _quiescenceSearch(board, quiescenceSearchDepth, alpha, beta, isMaximizingPlayer, aiPlayerType);
     }
 
@@ -179,17 +153,13 @@ class CheckersAI {
         ? aiPlayerType
         : (aiPlayerType == PieceType.red ? PieceType.black : PieceType.red);
 
-    // Generate all moves (jumps if mandatory, else regular)
     List<MapEntry<AIMove, List<List<Piece?>>>> childrenStatesAndMoves =
         _getSuccessorStates(board, currentPlayerForNode, capturesOnly: false);
 
     if (childrenStatesAndMoves.isEmpty) {
       bool isAISperspectiveNodePlayer = (currentPlayerForNode == aiPlayerType);
-      if (isAISperspectiveNodePlayer) {
-        return -10000.0 - depth; // AI is stuck
-      } else {
-        return 10000.0 + depth; // Opponent is stuck
-      }
+      if (isAISperspectiveNodePlayer) return -10000.0 - depth;
+      else return 10000.0 + depth;
     }
 
     if (isMaximizingPlayer) {
@@ -198,67 +168,105 @@ class CheckersAI {
         double eval = _minimax(entry.value, depth - 1, alpha, beta, false, aiPlayerType);
         maxEval = max(maxEval, eval);
         alpha = max(alpha, eval);
-        if (beta <= alpha) {
-          break;
-        }
+        if (beta <= alpha) break;
       }
       return maxEval;
-    } else { // Minimizing player
+    } else {
       double minEval = double.infinity;
       for (var entry in childrenStatesAndMoves) {
         double eval = _minimax(entry.value, depth - 1, alpha, beta, true, aiPlayerType);
         minEval = min(minEval, eval);
         beta = min(beta, eval);
-        if (beta <= alpha) {
-          break;
-        }
+        if (beta <= alpha) break;
       }
       return minEval;
     }
   }
 
-  // --- Main AI Method: findBestMove using Minimax with Alpha-Beta ---
+  // --- Main AI Method: findBestMove with Iterative Deepening ---
   AIMove? findBestMove(List<List<Piece?>> currentBoard, PieceType aiPlayerType) {
-    List<AIMove> bestMovesFound = [];
-    double maxScoreFound = -double.infinity;
+    AIMove? bestMoveFromOverallIterations; // Stores the best move from the deepest fully completed search
 
-    List<MapEntry<AIMove, List<List<Piece?>>>> possibleFirstMovesAndStates =
-        _getSuccessorStates(currentBoard, aiPlayerType, capturesOnly: false);
+    for (int currentIterativeDepth = 1; currentIterativeDepth <= searchDepth; currentIterativeDepth++) {
+      // print("[AI ID] Searching at depth: $currentIterativeDepth");
+      List<AIMove> bestMovesAtThisDepth = [];
+      double iterationMaxScore = -double.infinity;
 
-    if (possibleFirstMovesAndStates.isEmpty) {
-      return null;
-    }
+      List<MapEntry<AIMove, List<List<Piece?>>>> possibleFirstMovesAndStates =
+          _getSuccessorStates(currentBoard, aiPlayerType, capturesOnly: false);
 
-    for (var entry in possibleFirstMovesAndStates) {
-      AIMove initialMove = entry.key;
-      List<List<Piece?>> boardAfterInitialMoveSequence = entry.value;
-      
-      // Initial alpha for the root is -infinity, beta is +infinity
-      // maxScoreFound acts as alpha for the calls from the root for the first level of moves
-      double score = _minimax(boardAfterInitialMoveSequence, searchDepth - 1, maxScoreFound, double.infinity, false, aiPlayerType);
-      
-      AIMove currentAIMove = AIMove(
-          from: initialMove.from,
-          to: initialMove.to,
-          score: score,
-          isJump: initialMove.isJump
-      );
-
-      if (bestMovesFound.isEmpty || score > maxScoreFound) {
-        maxScoreFound = score;
-        bestMovesFound = [currentAIMove];
-      } else if (score == maxScoreFound) {
-        bestMovesFound.add(currentAIMove);
+      if (possibleFirstMovesAndStates.isEmpty) {
+        // print("[AI ID] No moves available for AI at depth $currentIterativeDepth.");
+        return null; // No moves at all for the AI
       }
+
+      // Move Ordering: Try the best move from the PREVIOUS iteration first
+      if (bestMoveFromOverallIterations != null) {
+        possibleFirstMovesAndStates.sort((a, b) {
+          // Check if move 'a' is the best move from the previous iteration
+          bool aIsPrevBest = a.key.from == bestMoveFromOverallIterations!.from && 
+                             a.key.to == bestMoveFromOverallIterations!.to &&
+                             a.key.isJump == bestMoveFromOverallIterations!.isJump; // also check jump status
+          // Check if move 'b' is the best move from the previous iteration
+          bool bIsPrevBest = b.key.from == bestMoveFromOverallIterations!.from && 
+                             b.key.to == bestMoveFromOverallIterations!.to &&
+                             b.key.isJump == bestMoveFromOverallIterations!.isJump;
+
+          if (aIsPrevBest) return -1; // 'a' comes first
+          if (bIsPrevBest) return 1;  // 'b' comes first
+
+          // Secondary sorting: jumps before non-jumps
+          if (a.key.isJump && !b.key.isJump) return -1;
+          if (!a.key.isJump && b.key.isJump) return 1;
+          
+          return 0; // Keep original relative order for other moves
+        });
+      } else { // First iteration (depth 1), just prioritize jumps
+        possibleFirstMovesAndStates.sort((a,b) {
+          if (a.key.isJump && !b.key.isJump) return -1;
+          if (!a.key.isJump && b.key.isJump) return 1;
+          return 0;
+        });
+      }
+
+      for (var entry in possibleFirstMovesAndStates) {
+        AIMove initialMove = entry.key;
+        List<List<Piece?>> boardAfterInitialMoveSequence = entry.value;
+        
+        // For each root move, we start a fresh alpha-beta search for its subtree
+        double score = _minimax(boardAfterInitialMoveSequence, currentIterativeDepth - 1,
+                                -double.infinity, double.infinity, // Initial alpha, beta for this path
+                                false, aiPlayerType); // false because it's opponent's turn next
+        
+        AIMove currentEvaluatedMove = AIMove(
+            from: initialMove.from,
+            to: initialMove.to,
+            score: score,
+            isJump: initialMove.isJump);
+
+        if (bestMovesAtThisDepth.isEmpty || score > iterationMaxScore) {
+          iterationMaxScore = score;
+          bestMovesAtThisDepth = [currentEvaluatedMove];
+        } else if (score == iterationMaxScore) {
+          bestMovesAtThisDepth.add(currentEvaluatedMove);
+        }
+      }
+      
+      if (bestMovesAtThisDepth.isNotEmpty) {
+        // Update the overall best move with the result from this completed depth
+        bestMoveFromOverallIterations = bestMovesAtThisDepth[_random.nextInt(bestMovesAtThisDepth.length)];
+        // print("[AI ID] Depth $currentIterativeDepth, Best move: $bestMoveFromOverallIterations, Score: $iterationMaxScore");
+      } else if (possibleFirstMovesAndStates.isNotEmpty && bestMoveFromOverallIterations == null) {
+        // This case handles if all moves at the first depth lead to very bad (e.g. -inf) scores
+        AIMove firstAvailable = possibleFirstMovesAndStates.first.key;
+        bestMoveFromOverallIterations = AIMove(from: firstAvailable.from, to: firstAvailable.to, score: iterationMaxScore, isJump: firstAvailable.isJump);
+      }
+
+      // TODO (Future): Implement a time limit check here.
+      // If time is up and bestMoveFromOverallIterations is not null, break the loop.
     }
     
-    if (bestMovesFound.isEmpty) {
-      if (possibleFirstMovesAndStates.isNotEmpty) {
-          AIMove firstAvailable = possibleFirstMovesAndStates.first.key;
-          return AIMove(from: firstAvailable.from, to: firstAvailable.to, score: maxScoreFound, isJump: firstAvailable.isJump);
-      }
-      return null;
-    }
-    return bestMovesFound[_random.nextInt(bestMovesFound.length)];
+    // print("[AI ID] Final chosen move after all iterations: $bestMoveFromOverallIterations");
+    return bestMoveFromOverallIterations; // Return the best move from the deepest fully completed search
   }
 }
