@@ -1,9 +1,8 @@
 // lib/ai_evaluators/turkish_checkers_evaluator.dart
-import 'dart:math'; // For min/max if needed, and .abs()
+ // For min/max if needed, and .abs()
 import '../models/piece_model.dart';
 import '../game_rules/game_rules.dart'; // For GameRules type and its methods
 import 'board_evaluator.dart';
-import '../game_rules/turkish_checkers_rules.dart';
 
 class TurkishCheckersEvaluator implements BoardEvaluator {
   // --- Piece-Square Tables (PSTs) for Turkish Dama ---
@@ -214,7 +213,7 @@ bool _isPieceAttacked(List<List<Piece?>> board, BoardPosition pieceToAttackPos, 
                 int dc = (landingPos.col - c).sign;
                 int scanR = r + dr;
                 int scanC = c + dc;
-                int intermediateOpponents = 0;
+                //int intermediateOpponents = 0; unused for now
                 BoardPosition? capturedByKing;
 
                 while(scanR != landingPos.row || scanC != landingPos.col) {

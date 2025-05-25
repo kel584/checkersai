@@ -1,5 +1,5 @@
 // Ensure these imports are present
-import 'package:flutter/foundation.dart'; // For compute
+//import 'package:flutter/foundation.dart'; // For compute
 import '../models/piece_model.dart';
 import '../game_rules/game_rules.dart';
 import 'checkers_ai.dart'; // Your CheckersAI class
