@@ -24,12 +24,41 @@ class AIMove {
 }
 
 class CheckersAI {
-  final int searchDepth; // How many plies (half-moves) AI looks ahead
+  final int searchDepth;
 
-  CheckersAI({this.searchDepth = 3}); // Default depth
+  CheckersAI({this.searchDepth = 9}); // Default depth
+
+  // --- Piece-Square Tables (PSTs) ---
+  // Values are from the perspective of the piece type.
+  // For BLACK (usually starts at top, row 0, moves towards row 7 to king)
+  // For RED (usually starts at bottom, row 7, moves towards row 0 to king)
+  // We'll define one set and flip row access for the other color.
+
+  static const List<List<double>> _manPst = [
+    // For a piece moving from row 0 towards row 7
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], // Should not be here unless just moved back (king)
+    [0.5, 0.6, 0.7, 0.7, 0.7, 0.7, 0.6, 0.5], // Advancing
+    [0.4, 0.5, 0.6, 0.6, 0.6, 0.6, 0.5, 0.4],
+    [0.3, 0.4, 0.5, 0.5, 0.5, 0.5, 0.4, 0.3], // Center-ish
+    [0.2, 0.3, 0.4, 0.4, 0.4, 0.4, 0.3, 0.2],
+    [0.1, 0.2, 0.3, 0.3, 0.3, 0.3, 0.2, 0.1],
+    [0.05, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.05], // Near own back rank
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], // Own back rank (men start here or near here)
+  ];
+
+  static const List<List<double>> _kingPst = [
+    [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+    [0.5, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.5],
+    [0.5, 0.6, 0.7, 0.7, 0.7, 0.7, 0.6, 0.5], // Good central rows
+    [0.5, 0.6, 0.7, 0.8, 0.8, 0.7, 0.6, 0.5], // Strong center
+    [0.5, 0.6, 0.7, 0.8, 0.8, 0.7, 0.6, 0.5], // Strong center
+    [0.5, 0.6, 0.7, 0.7, 0.7, 0.7, 0.6, 0.5],
+    [0.5, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.5],
+    [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], // Kings are generally good anywhere not trapped
+  ];
+
 
   // --- Evaluation Function ---
-  // Scores the given board state from the perspective of the aiPlayer
   double _evaluateBoard(List<List<Piece?>> board, PieceType aiPlayerType) {
     double score = 0;
     PieceType opponentPlayerType =
@@ -39,24 +68,25 @@ class CheckersAI {
       for (int c = 0; c < 8; c++) {
         final piece = board[r][c];
         if (piece != null) {
-          double pieceValue = piece.isKing ? 3.0 : 1.0;
-          // Basic positional heuristic: add small value for advancing
+          double pieceValue = piece.isKing ? 3.0 : 1.0; // Material value
+          double positionalValue = 0;
+
+          if (piece.isKing) {
+            // King PST is symmetrical, direct access
+            positionalValue = _kingPst[r][c];
+          } else {
+            // Man PST: needs row flipping based on color
+            if (piece.type == PieceType.black) { // Black moves from 0 towards 7
+              positionalValue = _manPst[r][c];
+            } else { // Red moves from 7 towards 0
+              positionalValue = _manPst[7 - r][c]; // Flip row index for Red
+            }
+          }
+
           if (piece.type == aiPlayerType) {
-            score += pieceValue;
-            if (!piece.isKing) { // Encourage advancing non-kings
-              if (aiPlayerType == PieceType.red) score += (7-r) * 0.05; // Red moves from row 7 to 0
-              else score += r * 0.05; // Black moves from row 0 to 7
-            } else { // Kings are valuable, slightly more so if central or defensive
-                if (r > 1 && r < 6) score += 0.1; // Slight preference for central kings
-            }
+            score += pieceValue + positionalValue;
           } else if (piece.type == opponentPlayerType) {
-            score -= pieceValue;
-            if (!piece.isKing) {
-              if (opponentPlayerType == PieceType.red) score -= (7-r) * 0.05;
-              else score -= r * 0.05;
-            } else {
-                 if (r > 1 && r < 6) score -= 0.1;
-            }
+            score -= (pieceValue + positionalValue);
           }
         }
       }
@@ -68,23 +98,22 @@ class CheckersAI {
     return r >= 0 && r < 8 && c >= 0 && c < 8;
   }
 
-  // --- Move Generation Helpers (adapted for AI context) ---
   Set<BoardPosition> _getJumpsForPieceAI(
       BoardPosition pos, Piece piece, List<List<Piece?>> board) {
     Set<BoardPosition> jumps = {};
     int r = pos.row;
     int c = pos.col;
 
-    List<BoardPosition> directionsDeltas = []; // Stores (deltaRow, deltaCol) for one step of jump
+    List<BoardPosition> directionsDeltas = [];
     if (piece.isKing) {
       directionsDeltas = [
-        BoardPosition(-1, -1), BoardPosition(-1, 1), // Jump over up-left/right
-        BoardPosition(1, -1), BoardPosition(1, 1),   // Jump over down-left/right
+        BoardPosition(-1, -1), BoardPosition(-1, 1),
+        BoardPosition(1, -1), BoardPosition(1, 1),
       ];
     } else {
       directionsDeltas = [
-        BoardPosition(piece.moveDirection, -1), // Jump over forward-left
-        BoardPosition(piece.moveDirection, 1),  // Jump over forward-right
+        BoardPosition(piece.moveDirection, -1),
+        BoardPosition(piece.moveDirection, 1),
       ];
     }
 
@@ -135,12 +164,11 @@ class CheckersAI {
     return moves;
   }
 
-  // --- Helper: Generate Successor States after a full atomic move (including multi-jumps) ---
   List<MapEntry<AIMove, List<List<Piece?>>>> _getSuccessorStates(
       List<List<Piece?>> board, PieceType playerToMove) {
     List<MapEntry<AIMove, List<List<Piece?>>>> successors = [];
-
     Map<BoardPosition, Set<BoardPosition>> allPotentialJumps = {};
+
     for (int r = 0; r < 8; r++) {
       for (int c = 0; c < 8; c++) {
         final piece = board[r][c];
@@ -160,13 +188,10 @@ class CheckersAI {
       allPotentialJumps.forEach((fromPos, firstJumpDestinations) {
         Piece originalPiece = board[fromPos.row][fromPos.col]!;
         for (BoardPosition firstJumpToPos in firstJumpDestinations) {
-          // Start simulation for this jump sequence
           List<List<Piece?>> currentSimBoard = board.map((row) => List<Piece?>.from(row)).toList();
-          Piece pieceInAction = Piece(type: originalPiece.type, isKing: originalPiece.isKing); // Piece being moved in sim
-
+          Piece pieceInAction = Piece(type: originalPiece.type, isKing: originalPiece.isKing);
           BoardPosition currentSimPos = fromPos;
 
-          // Simulate first jump
           currentSimBoard[firstJumpToPos.row][firstJumpToPos.col] = pieceInAction;
           currentSimBoard[currentSimPos.row][currentSimPos.col] = null;
           int capturedR = currentSimPos.row + (firstJumpToPos.row - currentSimPos.row) ~/ 2;
@@ -175,15 +200,13 @@ class CheckersAI {
           if (!pieceInAction.isKing && ((pieceInAction.type == PieceType.red && firstJumpToPos.row == 0) || (pieceInAction.type == PieceType.black && firstJumpToPos.row == 7))) {
             pieceInAction.isKing = true;
           }
-          currentSimPos = firstJumpToPos; // Update current position of the piece in action
+          currentSimPos = firstJumpToPos;
 
-          // Simulate multi-jumps
           Set<BoardPosition> nextJumps;
           do {
             nextJumps = _getJumpsForPieceAI(currentSimPos, pieceInAction, currentSimBoard);
             if (nextJumps.isNotEmpty) {
-              BoardPosition nextJumpToPos = nextJumps.first; // Simple: take the first available multi-jump path
-              
+              BoardPosition nextJumpToPos = nextJumps.first;
               currentSimBoard[nextJumpToPos.row][nextJumpToPos.col] = pieceInAction;
               currentSimBoard[currentSimPos.row][currentSimPos.col] = null;
               capturedR = currentSimPos.row + (nextJumpToPos.row - currentSimPos.row) ~/ 2;
@@ -199,8 +222,7 @@ class CheckersAI {
           successors.add(MapEntry(AIMove(from: fromPos, to: firstJumpToPos, score: 0, isJump: true), currentSimBoard));
         }
       });
-    } else {
-      // No jumps, generate regular moves
+    } else { // No jumps, generate regular moves
       for (int r = 0; r < 8; r++) {
         for (int c = 0; c < 8; c++) {
           final piece = board[r][c];
@@ -209,7 +231,7 @@ class CheckersAI {
             final regularMoves = _getRegularMovesForPieceAI(piecePos, piece, board);
             for (BoardPosition toPos in regularMoves) {
               List<List<Piece?>> boardCopy = board.map((row) => List<Piece?>.from(row)).toList();
-              Piece movedPiece = Piece(type: piece.type, isKing: piece.isKing); // Create new instance for the copy
+              Piece movedPiece = Piece(type: piece.type, isKing: piece.isKing);
               boardCopy[toPos.row][toPos.col] = movedPiece;
               boardCopy[piecePos.row][piecePos.col] = null;
               if (!movedPiece.isKing && ((movedPiece.type == PieceType.red && toPos.row == 0) || (movedPiece.type == PieceType.black && toPos.row == 7))) {
@@ -224,8 +246,7 @@ class CheckersAI {
     return successors;
   }
 
-  // --- Minimax Algorithm ---
-  double _minimax(List<List<Piece?>> board, int depth, bool isMaximizingPlayer, PieceType aiPlayerType) {
+  double _minimax(List<List<Piece?>> board, int depth, double alpha, double beta, bool isMaximizingPlayer, PieceType aiPlayerType) {
     if (depth == 0) {
       return _evaluateBoard(board, aiPlayerType);
     }
@@ -238,34 +259,39 @@ class CheckersAI {
         _getSuccessorStates(board, currentPlayerForNode);
 
     if (childrenStatesAndMoves.isEmpty) {
-      // No legal moves for the current player at this node = loss for them.
-      // Score from AI's perspective:
       bool isAISperspectiveNodePlayer = (currentPlayerForNode == aiPlayerType);
-      if (isAISperspectiveNodePlayer) { // AI's turn, but AI is stuck
-        return -10000.0 - depth; // Heavy penalty for AI being stuck
-      } else { // Opponent's turn, but opponent is stuck
-        return 10000.0 + depth; // Big bonus for AI as opponent is stuck
+      if (isAISperspectiveNodePlayer) {
+        return -10000.0 - depth; 
+      } else {
+        return 10000.0 + depth; 
       }
     }
 
-    if (isMaximizingPlayer) { // AI's turn
+    if (isMaximizingPlayer) {
       double maxEval = -double.infinity;
       for (var entry in childrenStatesAndMoves) {
-        double eval = _minimax(entry.value, depth - 1, false, aiPlayerType);
+        double eval = _minimax(entry.value, depth - 1, alpha, beta, false, aiPlayerType);
         maxEval = max(maxEval, eval);
+        alpha = max(alpha, eval);
+        if (beta <= alpha) {
+          break; 
+        }
       }
       return maxEval;
-    } else { // Opponent's turn
+    } else { 
       double minEval = double.infinity;
       for (var entry in childrenStatesAndMoves) {
-        double eval = _minimax(entry.value, depth - 1, true, aiPlayerType);
+        double eval = _minimax(entry.value, depth - 1, alpha, beta, true, aiPlayerType);
         minEval = min(minEval, eval);
+        beta = min(beta, eval);
+        if (beta <= alpha) {
+          break; 
+        }
       }
       return minEval;
     }
   }
 
-  // --- Main AI Method: findBestMove using Minimax ---
   AIMove? findBestMove(List<List<Piece?>> currentBoard, PieceType aiPlayerType) {
     AIMove? bestMoveFound;
     double maxScoreFound = -double.infinity;
@@ -274,32 +300,28 @@ class CheckersAI {
         _getSuccessorStates(currentBoard, aiPlayerType);
 
     if (possibleFirstMovesAndStates.isEmpty) {
-      // print("[AI findBestMove] No moves available for AI player $aiPlayerType.");
       return null;
     }
 
-    // print("[AI findBestMove] AI ($aiPlayerType) considering ${possibleFirstMovesAndStates.length} initial moves/sequences. Depth: $searchDepth");
-
     for (var entry in possibleFirstMovesAndStates) {
-      AIMove initialMove = entry.key; // Contains 'from' and the first 'to' of a sequence
+      AIMove initialMove = entry.key;
       List<List<Piece?>> boardAfterInitialMoveSequence = entry.value;
-
-      // Score this move by looking at the opponent's best response
-      double score = _minimax(boardAfterInitialMoveSequence, searchDepth - 1, false, aiPlayerType); // false: opponent's turn
-
-      // print("[AI findBestMove] Candidate Move: ${initialMove.from} to ${initialMove.to} (Jump: ${initialMove.isJump}), Evaluated Minimax Score: $score");
+      double score = _minimax(boardAfterInitialMoveSequence, searchDepth - 1, maxScoreFound, double.infinity, false, aiPlayerType);
       
       if (bestMoveFound == null || score > maxScoreFound) {
         maxScoreFound = score;
         bestMoveFound = AIMove(
             from: initialMove.from,
-            to: initialMove.to, // This is the first 'to' in the sequence
-            score: score,       // This is the minimax score
+            to: initialMove.to,
+            score: score,
             isJump: initialMove.isJump);
       }
     }
     
-    // print("[AI findBestMove] CHOSEN Best Move for $aiPlayerType: $bestMoveFound");
+    if (bestMoveFound == null && possibleFirstMovesAndStates.isNotEmpty) {
+        AIMove firstAvailable = possibleFirstMovesAndStates.first.key;
+        bestMoveFound = AIMove(from: firstAvailable.from, to: firstAvailable.to, score: maxScoreFound, isJump: firstAvailable.isJump);
+    }
     return bestMoveFound;
   }
 }
