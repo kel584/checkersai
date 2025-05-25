@@ -20,12 +20,20 @@ class AIFindBestMoveParams {
   });
 }
 
-AIMove? findBestMoveIsolate(AIFindBestMoveParams params) {
+Future<AIMove?> findBestMoveIsolate(AIFindBestMoveParams params) async{
+
+   
+
   // This function runs in the new isolate
   final ai = CheckersAI(
     rules: params.rules,
     searchDepth: params.searchDepth,
     quiescenceSearchDepth: params.quiescenceSearchDepth,
   );
-  return ai.findBestMove(params.board, params.playerType);
+  AIMove? result = ai.findBestMove(params.board, params.playerType);
+   print("[AI Isolate] Computation finished. Result: $result");
+
+  
+  // --------------------------------------------
+  return result;
 }
