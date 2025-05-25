@@ -40,7 +40,7 @@ class _GameScreenState extends State<GameScreen> {
   void initState() {
     super.initState();
     _currentRules = StandardCheckersRules(); // Default to standard checkers
-    _ai = CheckersAI(rules: _currentRules, searchDepth: 3); // Pass current rules, adjust depth as needed
+    _ai = CheckersAI(rules: _currentRules, searchDepth: 8); // Pass current rules, adjust depth as needed
     _resetGame();
   }
 
@@ -64,7 +64,7 @@ class _GameScreenState extends State<GameScreen> {
   void _changeGameVariant(GameRules newRules) {
     setState(() {
       _currentRules = newRules;
-      _ai = CheckersAI(rules: _currentRules, searchDepth: 3); // Re-initialize AI with new rules
+      _ai = CheckersAI(rules: _currentRules, searchDepth: 8); // Re-initialize AI with new rules
       _resetGame();
     });
   }

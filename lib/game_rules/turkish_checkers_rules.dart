@@ -80,41 +80,60 @@ class TurkishCheckersRules extends GameRules {
     return moves;
   }
 
-  @override
+@override
   Set<BoardPosition> getJumpMoves(
       BoardPosition piecePos, Piece piece, List<List<Piece?>> board) {
     Set<BoardPosition> jumps = {};
     int r = piecePos.row;
     int c = piecePos.col;
 
-    // Men and Kings jump orthogonally
-    const List<List<int>> jumpDirections = [[-1, 0], [1, 0], [0, -1], [0, 1]]; // Up, Down, Left, Right
+    // Orthogonal directions (Up, Down, Left, Right)
+    const List<List<int>> directions = [[-1, 0], [1, 0], [0, -1], [0, 1]]; 
 
-    if (piece.isKing) { // King (Dama) jump
-      for (var dir in jumpDirections) {
-        for (int i = 1; i < 8; i++) { // Check along the line
-          int jumpOverRow = r + dir[0] * i;
-          int jumpOverCol = c + dir[1] * i;
-          int landRow = r + dir[0] * (i + 1);
-          int landCol = c + dir[1] * (i + 1);
+    if (piece.isKing) { // King (Dama) jump logic
+      for (var dir in directions) {
+        BoardPosition? opponentPieceToJumpPos;
+        // Scan along the line to find the first piece to potentially jump
+        for (int i = 1; i < 8; i++) { // Max 7 squares to check along a line
+          int checkRow = r + dir[0] * i;
+          int checkCol = c + dir[1] * i;
 
-          if (!_isValidPosition(jumpOverRow, jumpOverCol)) break; // Off board
-
-          Piece? encounteredPiece = board[jumpOverRow][jumpOverCol];
-          if (encounteredPiece != null) {
-            if (encounteredPiece.type != piece.type) { // Opponent piece
-              if (_isValidPosition(landRow, landCol) && board[landRow][landCol] == null) {
-                jumps.add(BoardPosition(landRow, landCol));
-              }
-            }
-            break; // Path blocked (either by opponent that can be jumped or friendly)
+          if (!_isValidPosition(checkRow, checkCol)) { // Went off board
+            break;
           }
-          // If empty square, continue along line, but only if landing square is also valid
-          if (!_isValidPosition(landRow, landCol)) break;
+
+          Piece? encounteredPiece = board[checkRow][checkCol];
+          if (encounteredPiece != null) { // Found a piece
+            if (encounteredPiece.type != piece.type) { // It's an opponent's piece
+              opponentPieceToJumpPos = BoardPosition(checkRow, checkCol);
+            }
+            // Whether it's an opponent or friendly, this piece blocks further scanning *for a piece to jump*.
+            break;
+          }
+        }
+
+        // If an opponent piece was found that can be jumped
+        if (opponentPieceToJumpPos != null) {
+          // Now, scan *beyond* that opponent piece for all subsequent empty landing squares
+          for (int j = 1; j < 8; j++) {
+            int landRow = opponentPieceToJumpPos.row + dir[0] * j;
+            int landCol = opponentPieceToJumpPos.col + dir[1] * j;
+
+            if (!_isValidPosition(landRow, landCol)) { // Went off board
+              break;
+            }
+
+            if (board[landRow][landCol] == null) { // If the square is empty, it's a valid landing spot
+              jumps.add(BoardPosition(landRow, landCol));
+            } else {
+              // Path for landing is blocked by another piece (friendly or opponent), stop scanning in this direction.
+              break;
+            }
+          }
         }
       }
-    } else { // Man (Taş) jump - only over adjacent pieces
-      for (var dir in jumpDirections) {
+    } else { // Man (Taş) jump logic - only over adjacent pieces
+      for (var dir in directions) { // Men also jump orthogonally
         int jumpOverRow = r + dir[0];
         int jumpOverCol = c + dir[1];
         int landRow = r + dir[0] * 2;
@@ -133,16 +152,9 @@ class TurkishCheckersRules extends GameRules {
     return jumps;
   }
 
-  bool _shouldBecomeKing(BoardPosition pos, Piece piece) {
-    if (piece.isKing) return false;
-    // Black pieces king at row 7 (last row from their perspective)
-    if (piece.type == PieceType.black && pos.row == 7) return true;
-    // Red pieces king at row 0 (last row from their perspective)
-    if (piece.type == PieceType.red && pos.row == 0) return true;
-    return false;
-  }
 
-  @override
+
+@override
   MoveResult applyMoveAndGetResult({
     required List<List<Piece?>> currentBoard,
     required BoardPosition from,
@@ -150,64 +162,94 @@ class TurkishCheckersRules extends GameRules {
     required PieceType currentPlayer,
   }) {
     List<List<Piece?>> boardCopy = currentBoard.map((row) => List<Piece?>.from(row)).toList();
-    final pieceToMove = boardCopy[from.row][from.col];
-    if (pieceToMove == null) {
+    final pieceToMoveInitialState = boardCopy[from.row][from.col]; // Get the piece before moving
+
+    if (pieceToMoveInitialState == null) {
+      // Should not happen with valid 'from'
       return MoveResult(board: currentBoard, turnChanged: true, pieceKinged: false);
     }
 
-    Piece movedPiece = Piece(type: pieceToMove.type, isKing: pieceToMove.isKing);
-    boardCopy[to.row][to.col] = movedPiece;
-    boardCopy[from.row][from.col] = null;
+    // Create a new instance for the piece being moved to avoid state issues on the board copy
+    Piece pieceInAction = Piece(type: pieceToMoveInitialState.type, isKing: pieceToMoveInitialState.isKing);
+    
+    bool wasActualJumpPerformed = false;
     bool pieceKingedThisMove = false;
 
-    // Determine if it was a jump by checking distance and path for Turkish Checkers
-    bool wasJump = false;
-    if ((from.row == to.row && (to.col - from.col).abs() > 1) || // Horizontal jump
-        (from.col == to.col && (to.row - from.row).abs() > 1)) { // Vertical jump
-      wasJump = true;
-      int capturedRow, capturedCol;
-      if (from.row == to.row) { // Horizontal jump
-          capturedRow = from.row;
-          capturedCol = from.col + ((to.col - from.col) ~/ (to.col - from.col).abs()); // Square next to 'from' in direction of 'to'
-      } else { // Vertical jump
-          capturedCol = from.col;
-          capturedRow = from.row + ((to.row - from.row) ~/ (to.row - from.row).abs());
-      }
-      // For kings, the jumped piece could be further away, we need to find it if it was a king jump
-      if (movedPiece.isKing) {
-          int dr = (to.row - from.row).sign; // -1, 0, or 1
-          int dc = (to.col - from.col).sign; // -1, 0, or 1
-          // Iterate from 'from' towards 'to' to find the piece to capture
-          for (int i=1; i<8; i++) {
-              int rCheck = from.row + i * dr;
-              int cCheck = from.col + i * dc;
-              if (rCheck == to.row && cCheck == to.col) break; // Reached destination
-              if(!_isValidPosition(rCheck, cCheck)) break; // Out of bounds
-              
-              if (boardCopy[rCheck][cCheck] != null) { // Found piece to capture
-                  if(boardCopy[rCheck][cCheck]!.type != movedPiece.type) {
-                      boardCopy[rCheck][cCheck] = null;
-                  }
-                  break; // Only one piece can be jumped over per segment by a king
-              }
+    // Clear the 'from' position on the copy
+    boardCopy[from.row][from.col] = null;
+
+    // Determine if a capture occurred and remove the captured piece
+    if (pieceInAction.isKing) {
+      // King capture: Iterate path from 'from' to 'to', find one opponent piece to capture.
+      // 'to' must be empty before landing (which getJumpMoves should have ensured).
+      int dr = (to.row - from.row).sign; // -1, 0, or 1
+      int dc = (to.col - from.col).sign; // -1, 0, or 1
+      BoardPosition? capturedPieceActualPosition;
+
+      // Check squares strictly between 'from' and 'to'
+      for (int i = 1; ; ++i) {
+        int rCheck = from.row + i * dr;
+        int cCheck = from.col + i * dc;
+
+        if (rCheck == to.row && cCheck == to.col) break; // Reached destination square
+        if (!_isValidPosition(rCheck, cCheck)) break;   // Path went off board
+
+        if (boardCopy[rCheck][cCheck] != null) { // Found a piece on the path
+          if (boardCopy[rCheck][cCheck]!.type != pieceInAction.type) { // It's an opponent
+            if (capturedPieceActualPosition == null) { // First opponent piece found
+              capturedPieceActualPosition = BoardPosition(rCheck, cCheck);
+            } else { // Second piece on path, this is not a valid single jump over one piece
+              capturedPieceActualPosition = null; // Invalidate capture
+              break;
+            }
+          } else { // Friendly piece on path, blocks jump
+            capturedPieceActualPosition = null; // Invalidate capture
+            break;
           }
-      } else { // Man jump (always adjacent)
-           boardCopy[capturedRow][capturedCol] = null;
+        }
+      }
+
+      // If a single opponent piece was identified and 'to' is one step beyond it
+      if (capturedPieceActualPosition != null &&
+          to.row == capturedPieceActualPosition.row + dr &&
+          to.col == capturedPieceActualPosition.col + dc) {
+        boardCopy[capturedPieceActualPosition.row][capturedPieceActualPosition.col] = null; // Perform capture
+        wasActualJumpPerformed = true;
+      }
+    } else { // Man capture
+      // A man's jump is always over an adjacent piece, landing 2 squares away.
+      if (((to.row - from.row).abs() == 2 && from.col == to.col) ||
+          ((to.col - from.col).abs() == 2 && from.row == to.row)) {
+        int capturedRow = from.row + (to.row - from.row) ~/ 2;
+        int capturedCol = from.col + (to.col - from.col) ~/ 2;
+        
+        // Check if the jumped square actually contained an opponent piece
+        // (getJumpMoves should ensure this, but double check for robustness)
+        if (_isValidPosition(capturedRow, capturedCol) && 
+            currentBoard[capturedRow][capturedCol] != null && // Use original board to check what was there
+            currentBoard[capturedRow][capturedCol]!.type != pieceInAction.type) {
+          boardCopy[capturedRow][capturedCol] = null; // Already removed if we trust currentBoard or if applyMoveAndGetResult is purely functional
+          wasActualJumpPerformed = true;
+        }
       }
     }
 
+    // Place the piece at the 'to' position in the copy
+    boardCopy[to.row][to.col] = pieceInAction;
 
-    if (_shouldBecomeKing(to, movedPiece)) {
-      movedPiece.isKing = true;
+    // Kinging
+    if (_shouldBecomeKing(to, pieceInAction)) {
+      pieceInAction.isKing = true; // The instance 'pieceInAction' (which is on boardCopy) is updated
       pieceKingedThisMove = true;
     }
 
+    // Determine if turn should change
     bool turnShouldChange = true;
-    if (wasJump) {
-      // Pieces are removed immediately, so boardCopy is up-to-date
-      Set<BoardPosition> furtherJumps = getFurtherJumps(to, movedPiece, boardCopy);
+    if (wasActualJumpPerformed) { // Only check for further jumps if THIS move was a capture
+      // Pass the updated board (boardCopy) and the piece (pieceInAction) at its new position 'to'
+      Set<BoardPosition> furtherJumps = getFurtherJumps(to, pieceInAction, boardCopy);
       if (furtherJumps.isNotEmpty) {
-        turnShouldChange = false; // Multi-jump pending
+        turnShouldChange = false; // Multi-jump pending for the same player
       }
     }
 
@@ -270,6 +312,26 @@ class TurkishCheckersRules extends GameRules {
       }
     }
     return allMoves;
+  }
+
+bool _shouldBecomeKing(BoardPosition pos, Piece piece) {
+    if (piece.isKing) { // Already a king, no change
+      return false;
+    }
+
+    // Assuming Black pieces start at the "top" (e.g., rows 1, 2 in your initial setup)
+    // and move towards row 7 to become a king.
+    if (piece.type == PieceType.black && pos.row == 7) {
+      return true;
+    }
+
+    // Assuming Red pieces start at the "bottom" (e.g., rows 5, 6 in your initial setup)
+    // and move towards row 0 to become a king.
+    if (piece.type == PieceType.red && pos.row == 0) {
+      return true;
+    }
+
+    return false;
   }
 
 @override
