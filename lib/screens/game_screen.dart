@@ -19,7 +19,7 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> {
-  
+  bool _isDevAccessGranted = false;
   late GameRules _currentRules;
   List<List<Piece?>> _boardData = [];
   late PieceType _currentPlayer;
@@ -231,45 +231,60 @@ Future<String?> _showPasswordDialog(BuildContext context) async {
     },
   );
 }
+void _getAISuggestion() {
+  AIMove? bestMove = _ai.findBestMove(_boardData, _currentPlayer);
+  if (!mounted) return; // Check if the widget is still in the tree
 
-void _onAIAssistPressed() async { // Make the method async
+  setState(() {
+    _suggestedMove = bestMove;
+    if (bestMove == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                "AI (${_currentRules.gameVariantName}) found no moves for $_currentPlayer."),
+            duration: const Duration(seconds: 2)),
+      );
+    }
+  });
+}
+void _onAIAssistPressed() async {
   if (_isGameOver) {
-    _resetGame();
+    _resetGame(); // This will also set _isDevAccessGranted to false
     return;
   }
 
-  // Show password dialog and wait for result
-  final String? enteredPassword = await _showPasswordDialog(context);
-
-  // Check if the dialog was cancelled or if the widget is no longer mounted
-  if (enteredPassword == null || !mounted) {
-    return; // User cancelled or widget is gone
-  }
-
-  if (enteredPassword == _kDevPassword) {
-    // Password correct, proceed with AI suggestion
-    AIMove? bestMove = _ai.findBestMove(_boardData, _currentPlayer);
-    if (!mounted) return; // Check mounted again after async AI call
-
-    setState(() {
-      _suggestedMove = bestMove;
-      if (bestMove == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(
-                  "AI (${_currentRules.gameVariantName}) found no moves for $_currentPlayer."),
-              duration: const Duration(seconds: 2)),
-        );
-      }
-    });
+  if (_isDevAccessGranted) {
+    // Access has already been granted for this game session
+    _getAISuggestion();
   } else {
-    // Password incorrect
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-          content: Text("Incorrect password."),
-          duration: Duration(seconds: 2)),
-    );
+    // Access not granted yet, show the password dialog
+    final String? enteredPassword = await _showPasswordDialog(context);
+
+    if (enteredPassword == null || !mounted) {
+      return; // User cancelled or widget is gone
+    }
+
+    if (enteredPassword == _kDevPassword) {
+      // Password correct
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text("Developer AI access granted for this game."),
+            duration: Duration(seconds: 2)),
+      );
+      setState(() {
+        _isDevAccessGranted = true; // Grant access
+      });
+      _getAISuggestion(); // Proceed to get the first suggestion
+    } else {
+      // Password incorrect
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text("Incorrect password."),
+            duration: Duration(seconds: 2)),
+      );
+    }
   }
 }
 
