@@ -2,6 +2,8 @@
 import '../models/piece_model.dart';
 import 'game_rules.dart';
 import 'game_status.dart';
+import '../ai_evaluators/turkish_checkers_evaluator.dart';
+import '../ai_evaluators/board_evaluator.dart';
 
 class FullCaptureSequence {
   final BoardPosition initialFromPos;
@@ -485,6 +487,10 @@ bool _shouldBecomeKing(BoardPosition pos, Piece piece) {
     return false;
   }
 
+final TurkishCheckersEvaluator _evaluator = TurkishCheckersEvaluator();
+@override
+BoardEvaluator get boardEvaluator => _evaluator;  
+
 @override
   GameStatus checkWinCondition({
     required List<List<Piece?>> board,
@@ -539,28 +545,6 @@ bool _shouldBecomeKing(BoardPosition pos, Piece piece) {
     return GameStatus.ongoing(); // If no win/loss/draw condition met
   }
 
-// Simplified PST tables - smaller and faster to access
-static const List<List<double>> _turkishManPst = [
-  [0.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.0],
-  [0.1, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.1],
-  [0.2, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.2],
-  [0.3, 0.4, 0.4, 0.5, 0.5, 0.4, 0.4, 0.3],
-  [0.4, 0.5, 0.5, 0.6, 0.6, 0.5, 0.5, 0.4],
-  [0.5, 0.6, 0.6, 0.7, 0.7, 0.6, 0.6, 0.5],
-  [0.6, 0.7, 0.7, 0.8, 0.8, 0.7, 0.7, 0.6],
-  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-];
-
-static const List<List<double>> _turkishKingPst = [
-  [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6],
-  [0.6, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.6],
-  [0.6, 0.7, 0.8, 0.8, 0.8, 0.8, 0.7, 0.6],
-  [0.6, 0.7, 0.8, 0.9, 0.9, 0.8, 0.7, 0.6],
-  [0.6, 0.7, 0.8, 0.9, 0.9, 0.8, 0.7, 0.6],
-  [0.6, 0.7, 0.8, 0.8, 0.8, 0.8, 0.7, 0.6],
-  [0.6, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.6],
-  [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6],
-];
 
 @override
   String generateBoardStateHash(List<List<Piece?>> board, PieceType playerToMove) {
@@ -581,255 +565,6 @@ static const List<List<double>> _turkishKingPst = [
     }
     return sb.toString();
   }
-
-
-@override
-double evaluateBoardForAI(List<List<Piece?>> board, PieceType aiPlayerType) {
-  double score = 0;
-  PieceType opponentPlayerType = (aiPlayerType == PieceType.red) ? PieceType.black : PieceType.red;
-
-  // Single pass through the board to collect all information
-  int aiMen = 0, aiKings = 0;
-  int opponentMen = 0, opponentKings = 0;
-  double aiPositional = 0, opponentPositional = 0;
-  double aiAdvancement = 0, opponentAdvancement = 0;
-  double aiCentralization = 0, opponentCentralization = 0;
-  int aiCenterPieces = 0, opponentCenterPieces = 0;
-  
-  // Pre-calculate values to avoid repeated calculations
-  const double manValue = 100.0;
-  const double kingValue = 350.0;
-  
-  for (int r = 0; r < 8; r++) {
-    for (int c = 0; c < 8; c++) {
-      final piece = board[r][c];
-      if (piece == null) continue;
-      
-      bool isAiPiece = (piece.type == aiPlayerType);
-      
-      if (piece.isKing) {
-        if (isAiPiece) {
-          aiKings++;
-          aiPositional += _turkishKingPst[r][c];
-          // Kings prefer center - quick calculation
-          aiCentralization += (4.0 - ((r - 3.5).abs() + (c - 3.5).abs()) * 0.5) * 3.0;
-        } else {
-          opponentKings++;
-          opponentPositional += _turkishKingPst[r][c];
-          opponentCentralization += (4.0 - ((r - 3.5).abs() + (c - 3.5).abs()) * 0.5) * 3.0;
-        }
-      } else {
-        // Man piece
-        double pstValue, advancementValue;
-        int distanceToPromotion;
-        
-        if (piece.type == PieceType.black) {
-          pstValue = _turkishManPst[r][c];
-          distanceToPromotion = 7 - r;
-        } else {
-          pstValue = _turkishManPst[7 - r][c];
-          distanceToPromotion = r;
-        }
-        
-        advancementValue = (8 - distanceToPromotion) * 5.0;
-        if (distanceToPromotion <= 2) advancementValue += 25.0; // Near promotion bonus
-        
-        if (isAiPiece) {
-          aiMen++;
-          aiPositional += pstValue;
-          aiAdvancement += advancementValue;
-        } else {
-          opponentMen++;
-          opponentPositional += pstValue * 0.5; // Reduce opponent positional impact
-          opponentAdvancement += advancementValue * 0.7;
-        }
-      }
-      
-      // Count center pieces (quick check)
-      if (r >= 2 && r <= 5 && c >= 2 && c <= 5) {
-        if (isAiPiece) aiCenterPieces++;
-        else opponentCenterPieces++;
-      }
-    }
-  }
-
-  // === CORE SCORING ===
-  
-  // Material advantage (most important)
-  score += (aiMen * manValue + aiKings * kingValue) - 
-           (opponentMen * manValue + opponentKings * kingValue);
-
-  // Positional advantage
-  score += (aiPositional - opponentPositional) * 8.0;
-
-  // Advancement bonus
-  score += (aiAdvancement - opponentAdvancement);
-
-  // King activity bonus
-  score += (aiCentralization - opponentCentralization);
-
-  // Center control
-  score += (aiCenterPieces - opponentCenterPieces) * 12.0;
-
-  // === FAST MOBILITY CHECK ===
-  // Only do expensive mobility calculation in certain conditions
-  int totalPieces = aiMen + aiKings + opponentMen + opponentKings;
-  
-  if (totalPieces <= 12 || // Endgame
-      aiKings != opponentKings || // King imbalance
-      (aiMen + aiKings) <= 3 || (opponentMen + opponentKings) <= 3) { // Few pieces left
-    
-    score += _fastMobilityEvaluation(board, aiPlayerType, opponentPlayerType);
-  }
-
-  // === ENDGAME BONUSES ===
-  if (totalPieces <= 8) {
-    score += (aiKings - opponentKings) * 75.0; // Extra king bonus in endgame
-    
-    // Winning side should centralize kings, losing side should avoid edges
-    if (aiMen + aiKings > opponentMen + opponentKings) {
-      score += aiCentralization * 2.0;
-    }
-  }
-
-  // === QUICK TACTICAL CHECKS ===
-  
-  // Fast capture threat detection (only check immediate threats)
-  if (_hasImmediateCaptures(board, opponentPlayerType)) {
-    score -= 30.0; // Penalty for being under immediate threat
-  }
-  
-  if (_hasImmediateCaptures(board, aiPlayerType)) {
-    score += 20.0; // Bonus for having captures available
-  }
-
-  return score;
-}
-
-// Optimized mobility evaluation - only called when needed
-double _fastMobilityEvaluation(List<List<Piece?>> board, PieceType aiPlayerType, PieceType opponentPlayerType) {
-  int aiMobility = 0;
-  int opponentMobility = 0;
-  
-  for (int r = 0; r < 8; r++) {
-    for (int c = 0; c < 8; c++) {
-      final piece = board[r][c];
-      if (piece == null) continue;
-      
-      int mobility = _countQuickMoves(board, r, c, piece);
-      
-      if (piece.type == aiPlayerType) {
-        aiMobility += mobility;
-      } else {
-        opponentMobility += mobility;
-      }
-    }
-  }
-  
-  return (aiMobility - opponentMobility) * 4.0;
-}
-
-// Quick move counting without generating full move sets
-int _countQuickMoves(List<List<Piece?>> board, int r, int c, Piece piece) {
-  int moveCount = 0;
-  
-  if (piece.isKing) {
-    // King moves - check 4 directions
-    const List<List<int>> directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-    for (var dir in directions) {
-      for (int i = 1; i < 8; i++) {
-        int newR = r + dir[0] * i;
-        int newC = c + dir[1] * i;
-        if (!_isValidPosition(newR, newC) || board[newR][newC] != null) break;
-        moveCount++;
-      }
-    }
-  } else {
-    // Man moves - check 3 directions (forward + sideways)
-    int forwardDir = (piece.type == PieceType.black) ? 1 : -1;
-    
-    // Forward
-    if (_isValidPosition(r + forwardDir, c) && board[r + forwardDir][c] == null) {
-      moveCount++;
-    }
-    // Left
-    if (_isValidPosition(r, c - 1) && board[r][c - 1] == null) {
-      moveCount++;
-    }
-    // Right  
-    if (_isValidPosition(r, c + 1) && board[r][c + 1] == null) {
-      moveCount++;
-    }
-  }
-  
-  return moveCount;
-}
-
-// Fast capture detection - only checks if captures exist, doesn't enumerate them
-bool _hasImmediateCaptures(List<List<Piece?>> board, PieceType playerType) {
-  for (int r = 0; r < 8; r++) {
-    for (int c = 0; c < 8; c++) {
-      final piece = board[r][c];
-      if (piece != null && piece.type == playerType) {
-        if (_canCaptureFromPosition(board, r, c, piece)) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-// Quick capture check for a single piece
-bool _canCaptureFromPosition(List<List<Piece?>> board, int r, int c, Piece piece) {
-  if (piece.isKing) {
-    // King capture check - simplified
-    const List<List<int>> directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-    for (var dir in directions) {
-      bool foundOpponent = false;
-      for (int i = 1; i < 7; i++) { // Don't check full board length
-        int checkR = r + dir[0] * i;
-        int checkC = c + dir[1] * i;
-        if (!_isValidPosition(checkR, checkC)) break;
-        
-        Piece? checkPiece = board[checkR][checkC];
-        if (checkPiece != null) {
-          if (checkPiece.type != piece.type && !foundOpponent) {
-            foundOpponent = true;
-          } else {
-            break;
-          }
-        } else if (foundOpponent) {
-          return true; // Found empty square after opponent
-        }
-      }
-    }
-  } else {
-    // Man capture check
-    int forwardDir = (piece.type == PieceType.black) ? 1 : -1;
-    const List<List<int>> manDirs = [[1, 0], [0, -1], [0, 1]]; // Forward, left, right relative
-    
-    for (var dir in manDirs) {
-      int actualDr = (dir[0] == 1) ? forwardDir : dir[0];
-      int actualDc = dir[1];
-      
-      int jumpOverR = r + actualDr;
-      int jumpOverC = c + actualDc;
-      int landR = r + actualDr * 2;
-      int landC = c + actualDc * 2;
-      
-      if (_isValidPosition(landR, landC) && board[landR][landC] == null &&
-          _isValidPosition(jumpOverR, jumpOverC)) {
-        Piece? jumpedPiece = board[jumpOverR][jumpOverC];
-        if (jumpedPiece != null && jumpedPiece.type != piece.type) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
 
   @override
   bool isMaximalCaptureMandatory() => true; // Implemented as false for now

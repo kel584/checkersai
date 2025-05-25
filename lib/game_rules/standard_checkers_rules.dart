@@ -3,6 +3,8 @@
 import '../models/piece_model.dart';
 import 'game_rules.dart';
 import 'game_status.dart';
+import '../ai_evaluators/board_evaluator.dart';      // NEW IMPORT
+import '../ai_evaluators/standard_checkers_evaluator.dart'; // NEW IMPORT
 
 class StandardCheckersRules extends GameRules {
   @override
@@ -13,6 +15,11 @@ class StandardCheckersRules extends GameRules {
 
   @override
   bool get piecesOnDarkSquaresOnly => true;
+
+  final StandardCheckersEvaluator _evaluator = StandardCheckersEvaluator();
+
+  @override
+  BoardEvaluator get boardEvaluator => _evaluator;
 
   @override
   List<List<Piece?>> initialBoardSetup() {
@@ -276,62 +283,6 @@ GameStatus checkWinCondition({
   }
 
   return GameStatus.ongoing(); // Game ongoing
-}
-  
-  // --- Piece-Square Tables (PSTs) ---
-  static const List<List<double>> _manPst = [
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 
-    [0.5, 0.6, 0.7, 0.7, 0.7, 0.7, 0.6, 0.5], 
-    [0.4, 0.5, 0.6, 0.6, 0.6, 0.6, 0.5, 0.4],
-    [0.3, 0.4, 0.5, 0.5, 0.5, 0.5, 0.4, 0.3], 
-    [0.2, 0.3, 0.4, 0.4, 0.4, 0.4, 0.3, 0.2],
-    [0.1, 0.2, 0.3, 0.3, 0.3, 0.3, 0.2, 0.1],
-    [0.05, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.05],
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 
-  ];
-
-  static const List<List<double>> _kingPst = [
-    [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
-    [0.5, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.5],
-    [0.5, 0.6, 0.7, 0.7, 0.7, 0.7, 0.6, 0.5],
-    [0.5, 0.6, 0.7, 0.8, 0.8, 0.7, 0.6, 0.5], 
-    [0.5, 0.6, 0.7, 0.8, 0.8, 0.7, 0.6, 0.5], 
-    [0.5, 0.6, 0.7, 0.7, 0.7, 0.7, 0.6, 0.5],
-    [0.5, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.5],
-    [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], 
-  ];
-
-  @override
-  double evaluateBoardForAI(List<List<Piece?>> board, PieceType aiPlayerType) {
-    double score = 0;
-    PieceType opponentPlayerType =
-        (aiPlayerType == PieceType.red) ? PieceType.black : PieceType.red;
-
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        final piece = board[r][c];
-        if (piece != null) {
-          double pieceValue = piece.isKing ? 3.0 : 1.0;
-          double positionalValue = 0;
-
-          if (piece.isKing) {
-            positionalValue = _kingPst[r][c];
-          } else {
-            if (piece.type == PieceType.black) { // Black moves 0->7
-              positionalValue = _manPst[r][c];
-            } else { // Red moves 7->0
-              positionalValue = _manPst[7 - r][c];
-            }
-          }
-
-          if (piece.type == aiPlayerType) {
-            score += pieceValue + positionalValue;
-          } else if (piece.type == opponentPlayerType) {
-            score -= (pieceValue + positionalValue);
-          }
-        }
-      }
-    }
-    return score;
   }
+  
 }

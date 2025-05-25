@@ -1,6 +1,7 @@
 // lib/game_rules/game_rules.dart
 import '../models/piece_model.dart'; // Or wherever your models are
 import 'game_status.dart'; // Import the new GameStatus
+import '../ai_evaluators/board_evaluator.dart';
 
 // Helper to return results from applying a move
 class MoveResult {
@@ -14,6 +15,7 @@ class MoveResult {
 abstract class GameRules {
   String get gameVariantName; // e.g., "Standard Checkers", "Turkish Checkers"
   PieceType get startingPlayer;
+  BoardEvaluator get boardEvaluator;
 
   // Initializes the board for the start of the game
   List<List<Piece?>> initialBoardSetup();
@@ -84,7 +86,12 @@ abstract class GameRules {
   // Evaluation function specific to this game variant for AI
   // This is a big one; the AI's evaluation is highly rule-dependent.
   // For now, you can have a default or make AI use a generic one and then specialize.
-  double evaluateBoardForAI(List<List<Piece?>> board, PieceType aiPlayerType);
-
+ double evaluateBoardForAI(List<List<Piece?>> board, PieceType aiPlayerType) {
+    return boardEvaluator.evaluate(
+      board: board,
+      aiPlayerType: aiPlayerType,
+      rules: this, // Pass 'this' GameRules instance to the evaluator
+    );
+  }
   String generateBoardStateHash(List<List<Piece?>> board, PieceType playerToMove);
 }
