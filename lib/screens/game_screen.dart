@@ -99,7 +99,7 @@ class _GameScreenState extends State<GameScreen> {
     super.initState();
     _currentRules = StandardCheckersRules();
     // _ai instance is kept for holding parameters like searchDepth
-    _ai = CheckersAI(rules: _currentRules, searchDepth: 4, quiescenceSearchDepth: 3);
+    _ai = CheckersAI(rules: _currentRules, searchDepth: 5, quiescenceSearchDepth: 4);
     _spawnAiIsolate(); // Spawn the long-lived isolate
     _resetGame();
   }

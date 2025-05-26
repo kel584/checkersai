@@ -7,234 +7,45 @@ import '../utils/bit_utils.dart';
 import '../game_rules/game_rules.dart';
 import 'board_evaluator.dart';
 
-// Lightweight performance tracking - only for critical operations
-class _PerformanceTracker {
-  static int _totalEvaluations = 0;
-  static int _totalScanTime = 0;
-  static int _totalMobilityTime = 0;
-  static final Stopwatch _globalTimer = Stopwatch();
-  
-  static void startEvaluation() {
-    _totalEvaluations++;
-    _globalTimer.start();
-  }
-  
-  static void endEvaluation() {
-    _globalTimer.stop();
-    if (_totalEvaluations % 1000 == 0) {
-      print('Evaluations: $_totalEvaluations, Avg time: ${_globalTimer.elapsedMicroseconds ~/ _totalEvaluations}μs');
-    }
-  }
-  
-  static void reset() {
-    _totalEvaluations = 0;
-    _totalScanTime = 0;
-    _totalMobilityTime = 0;
-    _globalTimer.reset();
-  }
-}
-
-// Compact board analysis data
-class _BoardData {
-  final double materialScore;
-  final double keySquareScore;
-  final double promotionScore;
-  final double clusteringScore;
-  final int totalPieces;
-  final int aiMen;
-  final int aiKings;
-  final int opponentMen;
-  final int opponentKings;
-  final int aiMenBB;
-  final int aiKingsBB;
-  final int opponentMenBB;
-  final int opponentKingsBB;
-  final int allAiPiecesBB;
-  final int allOpponentPiecesBB;
-
-  const _BoardData({
-    required this.materialScore,
-    required this.keySquareScore,
-    required this.promotionScore,
-    required this.clusteringScore,
-    required this.totalPieces,
-    required this.aiMen,
-    required this.aiKings,
-    required this.opponentMen,
-    required this.opponentKings,
-    required this.aiMenBB,
-    required this.aiKingsBB,
-    required this.opponentMenBB,
-    required this.opponentKingsBB,
-    required this.allAiPiecesBB,
-    required this.allOpponentPiecesBB,
-  });
-}
-
+/// Optimized Turkish Dama evaluator with reduced logging and improved performance
 class TurkishCheckersEvaluator implements BoardEvaluator {
-  // Material values
-  static const double _manValue = 100.0;
-  static const double _kingValue = 300.0;
-
-  // Evaluation weights - simplified and optimized
-  static const double _wMaterial = 1.0;
-  static const double _wMobility = 0.4;
-  static const double _wKeySquares = 0.15;
-  static const double _wPromotion = 0.25;
-  static const double _wDefense = 0.2;
-  static const double _wClustering = 0.1;
-  static const double _wThreatDetection = 1.2;
-  static const double _wKingCentralization = 0.3;
-  static const double _wEndgameKingAdvantage = 50.0;
-
-  // Precomputed lookup tables for fast evaluation
-  static final List<double> _centerSquareValues = _precomputeCenterValues();
-  static final List<double> _promotionBonuses = [0.0, 4.0, 8.0, 15.0, 25.0, 40.0, 65.0, 0.0];
-  static final List<double> _centralizationValues = _precomputeCentralization();
-
-  // Precompute center square values
-  static List<double> _precomputeCenterValues() {
-    final values = List<double>.filled(64, 0.0);
-    // Center squares (3,3), (3,4), (4,3), (4,4)
-    const centerIndices = [27, 28, 35, 36];
-    const extendedCenter = [18, 19, 20, 21, 26, 29, 34, 37, 42, 43, 44, 45];
-    
-    for (final idx in centerIndices) {
-      values[idx] = 1.0;
+  // Piece values in centipawns
+  static const int _manMg = 100, _manEg = 120;
+  static const int _kingMg = 300, _kingEg = 350;
+  
+  // Evaluation weights with middlegame/endgame tapering
+  static const int _mobilityMg = 4, _mobilityEg = 8;
+  static const int _threatMg = 12, _threatEg = 15;
+  static const int _defenseMg = 6, _defensEg = 4;
+  
+  // Precomputed tables
+  static final List<int> _centerBonus = _initCenterTable();
+  static final List<int> _promotionBonus = [0, 5, 12, 22, 35, 52, 72, 0];
+  static final List<int> _kingCentralization = _initKingTable();
+  
+  // Bitboard masks for fast evaluation
+  static const int _edgeMask = 0xFF818181818181FF;
+  
+  // Add debug flag to control logging
+  static const bool _enableDebug = false;
+  
+  static List<int> _initCenterTable() {
+    final table = List<int>.filled(64, 0);
+    for (int sq = 0; sq < 64; sq++) {
+      final r = sq ~/ 8, c = sq % 8;
+      final centerDist = max((r - 3.5).abs(), (c - 3.5).abs());
+      table[sq] = (20 - (centerDist * 4)).round().clamp(0, 20);
     }
-    for (final idx in extendedCenter) {
-      values[idx] = 0.5;
-    }
-    return values;
+    return table;
   }
-
-  // Precompute centralization values
-  static List<double> _precomputeCentralization() {
-    final values = List<double>.filled(64, 0.0);
-    for (int i = 0; i < 64; i++) {
-      final r = i ~/ 8;
-      final c = i % 8;
-      values[i] = (3.5 - (r - 3.5).abs()) + (3.5 - (c - 3.5).abs());
+  
+  static List<int> _initKingTable() {
+    final table = List<int>.filled(64, 0);
+    for (int sq = 0; sq < 64; sq++) {
+      final r = sq ~/ 8, c = sq % 8;
+      table[sq] = ((7 - (r - 3.5).abs()) + (7 - (c - 3.5).abs())).round();
     }
-    return values;
-  }
-
-  // Fast inline checks
-  static bool _isValidPosition(int r, int c) => r >= 0 && r < 8 && c >= 0 && c < 8;
-
-  // Optimized board scanning with minimal allocations
-  _BoardData _scanBoard(BitboardState board, PieceType aiPlayerType, PieceType opponentPlayerType) {
-    double materialScore = 0;
-    double keySquareScore = 0;
-    double promotionScore = 0;
-    double clusteringScore = 0;
-
-    final bool aiIsBlack = aiPlayerType == PieceType.black;
-    
-    final int aiMenBB = aiIsBlack ? board.blackMen : board.redMen;
-    final int aiKingsBB = aiIsBlack ? board.blackKings : board.redKings;
-    final int opponentMenBB = aiIsBlack ? board.redMen : board.blackMen;
-    final int opponentKingsBB = aiIsBlack ? board.redKings : board.blackKings;
-
-    final int allAiPiecesBB = aiMenBB | aiKingsBB;
-    final int allOpponentPiecesBB = opponentMenBB | opponentKingsBB;
-
-    // Count pieces and calculate scores in single pass
-    int aiMen = 0, aiKings = 0, opponentMen = 0, opponentKings = 0;
-
-    // Process AI Men - safe loop with counter
-    int tempAiMen = aiMenBB;
-    int counter = 0;
-    while (tempAiMen != 0 && counter < 32) { // Safety counter
-      counter++;
-      final int index = lsbIndex(tempAiMen);
-      if (index < 0 || index >= 64) break; // Safety check
-      
-      aiMen++;
-      materialScore += _manValue;
-      keySquareScore += _centerSquareValues[index];
-      
-      final int r = indexToRow(index);
-      final int advancement = aiIsBlack ? r : (7 - r);
-      if (advancement >= 0 && advancement < _promotionBonuses.length) {
-        promotionScore += _promotionBonuses[advancement];
-      }
-      
-      clusteringScore += _countAdjacentFriendly(index, allAiPiecesBB);
-      tempAiMen = clearBit(tempAiMen, index);
-    }
-
-    // Process AI Kings - safe loop
-    int tempAiKings = aiKingsBB;
-    counter = 0;
-    while (tempAiKings != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempAiKings);
-      if (index < 0 || index >= 64) break;
-      
-      aiKings++;
-      materialScore += _kingValue;
-      keySquareScore += _centerSquareValues[index];
-      clusteringScore += _countAdjacentFriendly(index, allAiPiecesBB);
-      tempAiKings = clearBit(tempAiKings, index);
-    }
-
-    // Process Opponent Men - safe loop
-    int tempOpponentMen = opponentMenBB;
-    counter = 0;
-    while (tempOpponentMen != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempOpponentMen);
-      if (index < 0 || index >= 64) break;
-      
-      opponentMen++;
-      materialScore -= _manValue;
-      keySquareScore -= _centerSquareValues[index];
-      
-      final int r = indexToRow(index);
-      final int advancement = aiIsBlack ? (7 - r) : r;
-      if (advancement >= 0 && advancement < _promotionBonuses.length) {
-        promotionScore -= _promotionBonuses[advancement];
-      }
-      
-      clusteringScore -= _countAdjacentFriendly(index, allOpponentPiecesBB);
-      tempOpponentMen = clearBit(tempOpponentMen, index);
-    }
-
-    // Process Opponent Kings - safe loop
-    int tempOpponentKings = opponentKingsBB;
-    counter = 0;
-    while (tempOpponentKings != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempOpponentKings);
-      if (index < 0 || index >= 64) break;
-      
-      opponentKings++;
-      materialScore -= _kingValue;
-      keySquareScore -= _centerSquareValues[index];
-      clusteringScore -= _countAdjacentFriendly(index, allOpponentPiecesBB);
-      tempOpponentKings = clearBit(tempOpponentKings, index);
-    }
-
-    final int totalPieces = aiMen + aiKings + opponentMen + opponentKings;
-
-    return _BoardData(
-      materialScore: materialScore,
-      keySquareScore: keySquareScore,
-      promotionScore: promotionScore,
-      clusteringScore: clusteringScore,
-      totalPieces: totalPieces,
-      aiMen: aiMen,
-      aiKings: aiKings,
-      opponentMen: opponentMen,
-      opponentKings: opponentKings,
-      aiMenBB: aiMenBB,
-      aiKingsBB: aiKingsBB,
-      opponentMenBB: opponentMenBB,
-      opponentKingsBB: opponentKingsBB,
-      allAiPiecesBB: allAiPiecesBB,
-      allOpponentPiecesBB: allOpponentPiecesBB,
-    );
+    return table;
   }
 
   @override
@@ -243,343 +54,295 @@ class TurkishCheckersEvaluator implements BoardEvaluator {
     required PieceType aiPlayerType,
     required GameRules rules,
   }) {
-    _PerformanceTracker.startEvaluation();
-    
-    final opponentPlayerType = (aiPlayerType == PieceType.red) ? PieceType.black : PieceType.red;
-    final boardData = _scanBoard(board, aiPlayerType, opponentPlayerType);
-
-    // Early termination for game over states
-    if (boardData.allAiPiecesBB == 0 && boardData.allOpponentPiecesBB != 0) {
-      _PerformanceTracker.endEvaluation();
-      return -99999.0;
-    }
-    if (boardData.allOpponentPiecesBB == 0 && boardData.allAiPiecesBB != 0) {
-      _PerformanceTracker.endEvaluation();
-      return 99999.0;
-    }
-
-    double totalScore = 0;
-    final bool isEndgame = boardData.totalPieces <= 10;
-
-    // Core evaluation components
-    totalScore += boardData.materialScore * _wMaterial;
-    totalScore += boardData.keySquareScore * _wKeySquares;
-    totalScore += boardData.promotionScore * _wPromotion;
-    totalScore += boardData.clusteringScore * _wClustering;
-
-    // Conditional evaluations based on game state
-    if (boardData.totalPieces > 4) {
-      final mobilityScore = _calculateFastMobility(board, aiPlayerType, opponentPlayerType, rules, boardData);
-      totalScore += mobilityScore * _wMobility;
+    if (_enableDebug) {
+      developer.log('🔍 Starting evaluation for ${aiPlayerType.toString()}');
     }
     
-    if (boardData.totalPieces > 6) {
-      final defenseScore = _calculateDefense(boardData);
-      totalScore += defenseScore * _wDefense;
+    final isBlack = aiPlayerType == PieceType.black;
+    final aiMen = isBlack ? board.blackMen : board.redMen;
+    final aiKings = isBlack ? board.blackKings : board.redKings;
+    final oppMen = isBlack ? board.redMen : board.blackMen;
+    final oppKings = isBlack ? board.redKings : board.blackKings;
+    
+    final aiPieces = aiMen | aiKings;
+    final oppPieces = oppMen | oppKings;
+    
+    // Fast termination check
+    if (aiPieces == 0) {
+      return oppPieces == 0 ? 0 : -32000;
+    }
+    if (oppPieces == 0) {
+      return 32000;
     }
     
-    // Threat detection - always important
-    final threatScore = _detectThreats(board, aiPlayerType, opponentPlayerType, rules, boardData);
-    totalScore += threatScore * _wThreatDetection;
+    final pieceCount = popCount(aiPieces | oppPieces);
+    final phase = _calculatePhase(pieceCount);
     
-    // King evaluations
-    final kingAdvantage = (boardData.aiKings - boardData.opponentKings) * 
-        (isEndgame ? _wEndgameKingAdvantage : _wEndgameKingAdvantage * 0.3);
-    final kingCentralization = _calculateKingCentralization(boardData.aiKingsBB, boardData.opponentKingsBB) * 
-        _wKingCentralization * (isEndgame ? 1.0 : 0.5);
+    var mgScore = 0, egScore = 0;
     
-    totalScore += kingAdvantage + kingCentralization;
-
-    _PerformanceTracker.endEvaluation();
-    return totalScore;
-  }
-
-  // Optimized mobility calculation
-  double _calculateFastMobility(BitboardState board, PieceType aiPlayerType, 
-      PieceType opponentPlayerType, GameRules rules, _BoardData boardData) {
+    // Material and positional evaluation
+    final scores = _EvaluationScores();
+    _evaluatePieces(aiMen, _manMg, _manEg, true, isBlack, scores);
+    _evaluatePieces(aiKings, _kingMg, _kingEg, false, isBlack, scores);
+    _evaluatePieces(oppMen, -_manMg, -_manEg, true, !isBlack, scores);
+    _evaluatePieces(oppKings, -_kingMg, -_kingEg, false, !isBlack, scores);
     
-    int aiMoves = 0;
-    int opponentMoves = 0;
-    final int emptySquares = board.allEmptySquares;
-
-    // Count AI moves - optimized loops with safety counters
-    int tempAiMen = boardData.aiMenBB;
-    int counter = 0;
-    while (tempAiMen != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempAiMen);
-      if (index < 0 || index >= 64) break;
-      
-      aiMoves += _countMovesForMan(index, aiPlayerType, emptySquares, board, rules);
-      tempAiMen = clearBit(tempAiMen, index);
-    }
-
-    int tempAiKings = boardData.aiKingsBB;
-    counter = 0;
-    while (tempAiKings != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempAiKings);
-      if (index < 0 || index >= 64) break;
-      
-      aiMoves += _countMovesForKing(index, emptySquares, board, rules, aiPlayerType);
-      tempAiKings = clearBit(tempAiKings, index);
-    }
-
-    // Count opponent moves
-    int tempOpponentMen = boardData.opponentMenBB;
-    counter = 0;
-    while (tempOpponentMen != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempOpponentMen);
-      if (index < 0 || index >= 64) break;
-      
-      opponentMoves += _countMovesForMan(index, opponentPlayerType, emptySquares, board, rules);
-      tempOpponentMen = clearBit(tempOpponentMen, index);
-    }
-
-    int tempOpponentKings = boardData.opponentKingsBB;
-    counter = 0;
-    while (tempOpponentKings != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempOpponentKings);
-      if (index < 0 || index >= 64) break;
-      
-      opponentMoves += _countMovesForKing(index, emptySquares, board, rules, opponentPlayerType);
-      tempOpponentKings = clearBit(tempOpponentKings, index);
-    }
-
-    return (aiMoves - opponentMoves).toDouble();
-  }
-
-  // Fast move counting for men
-  int _countMovesForMan(int pieceIndex, PieceType pieceType, int emptySquares, BitboardState board, GameRules rules) {
-    int moveCount = 0;
-    final int r = indexToRow(pieceIndex);
-    final int c = indexToCol(pieceIndex);
+    mgScore = scores.mg;
+    egScore = scores.eg;
     
-    // Turkish checkers: men move forward and sideways
-    final int forwardDir = (pieceType == PieceType.black) ? 1 : -1;
-    final List<List<int>> moves = [[forwardDir, 0], [0, -1], [0, 1]];
-    
-    for (final move in moves) {
-      final int nr = r + move[0];
-      final int nc = c + move[1];
-      if (_isValidPosition(nr, nc) && isSet(emptySquares, rcToIndex(nr, nc))) {
-        moveCount++;
+    // Lazy evaluation threshold
+    final materialImbalance = (mgScore + egScore) ~/ 2;
+    if (materialImbalance.abs() > 150 && pieceCount > 8) {
+      final lazyScore = _taperScore(mgScore, egScore, phase);
+      if (_enableDebug) {
+        developer.log('⚡ Lazy evaluation: $lazyScore');
       }
+      return lazyScore.toDouble();
     }
-
-    // Add jumps
-    try {
-      final jumps = rules.getJumpMoves(BoardPosition(r, c), Piece(type: pieceType, isKing: false), board);
-      moveCount += jumps.length;
-    } catch (e) {
-      // Handle potential errors from rules engine
-    }
-
-    return moveCount;
-  }
-
-  // Fast move counting for kings
-  int _countMovesForKing(int pieceIndex, int emptySquares, BitboardState board, GameRules rules, PieceType pieceType) {
-    int moveCount = 0;
-    final int r = indexToRow(pieceIndex);
-    final int c = indexToCol(pieceIndex);
     
-    // Turkish Dama King moves like a rook
-    const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-    for (final dir in directions) {
-      for (int i = 1; i < 8; i++) {
-        final int nr = r + dir[0] * i;
-        final int nc = c + dir[1] * i;
-        if (!_isValidPosition(nr, nc)) break;
-        
-        final int targetIndex = rcToIndex(nr, nc);
-        if (!isSet(emptySquares, targetIndex)) break;
-        moveCount++;
-      }
+    // Mobility evaluation (simplified)
+    final mobility = _evaluateMobilityFast(board, aiPlayerType, aiPieces, oppPieces);
+    mgScore += mobility * _mobilityMg ~/ 10;
+    egScore += mobility * _mobilityEg ~/ 10;
+    
+    // Threat evaluation (simplified)
+    final threats = _evaluateThreatsFast(board, aiPlayerType, rules, aiPieces, oppPieces);
+    mgScore += threats * _threatMg ~/ 10;
+    egScore += threats * _threatEg ~/ 10;
+    
+    // King safety
+    if (pieceCount <= 12) {
+      final kingSafety = _evaluateKingSafety(aiKings, oppKings, aiPieces, oppPieces);
+      mgScore += kingSafety * _defenseMg ~/ 10;
+      egScore += kingSafety * _defensEg ~/ 10;
     }
-
-    // Add jumps
-    try {
-      final jumps = rules.getJumpMoves(BoardPosition(r, c), Piece(type: pieceType, isKing: true), board);
-      moveCount += jumps.length;
-    } catch (e) {
-      // Handle potential errors from rules engine
+    
+    final finalScore = _taperScore(mgScore, egScore, phase);
+    if (_enableDebug) {
+      developer.log('✅ Final score: $finalScore');
     }
-
-    return moveCount;
+    return finalScore.toDouble();
   }
-
-  // Simplified defense calculation
-  double _calculateDefense(_BoardData boardData) {
-    double score = 0;
-    const double supportBonus = 0.3;
-
-    // AI defense
-    int tempAi = boardData.allAiPiecesBB;
-    int counter = 0;
-    while (tempAi != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempAi);
-      if (index < 0 || index >= 64) break;
+  
+  void _evaluatePieces(int pieceBB, int mgVal, int egVal, bool isMan, bool isBlackPiece, 
+                      _EvaluationScores scores) {
+    if (pieceBB == 0) return;
+    
+    var pieces = pieceBB;
+    var safetyCounter = 0; // Prevent infinite loops
+    
+    while (pieces != 0 && safetyCounter < 32) {
+      final sq = lsbIndex(pieces);
+      if (sq < 0 || sq >= 64) break;
       
-      if (_hasAdjacentAlly(index, boardData.allAiPiecesBB)) {
-        score += supportBonus;
-      }
-      tempAi = clearBit(tempAi, index);
-    }
-
-    // Opponent defense
-    int tempOpp = boardData.allOpponentPiecesBB;
-    counter = 0;
-    while (tempOpp != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempOpp);
-      if (index < 0 || index >= 64) break;
+      pieces = clearBit(pieces, sq);
+      safetyCounter++;
       
-      if (_hasAdjacentAlly(index, boardData.allOpponentPiecesBB)) {
-        score -= supportBonus;
-      }
-      tempOpp = clearBit(tempOpp, index);
-    }
-
-    return score;
-  }
-
-  // Simplified threat detection
-  double _detectThreats(BitboardState board, PieceType aiPlayerType, 
-      PieceType opponentPlayerType, GameRules rules, _BoardData boardData) {
-    double threatScore = 0;
-
-    // Quick threat analysis using bitboard positions
-    int tempAi = boardData.allAiPiecesBB;
-    int counter = 0;
-    while (tempAi != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempAi);
-      if (index < 0 || index >= 64) break;
+      scores.mg += mgVal;
+      scores.eg += egVal;
       
-      final int r = indexToRow(index);
-      final int c = indexToCol(index);
-      final bool isKing = isSet(boardData.aiKingsBB, index);
-      
-      try {
-        final jumps = rules.getJumpMoves(BoardPosition(r, c), Piece(type: aiPlayerType, isKing: isKing), board);
-        if (jumps.isNotEmpty) {
-          threatScore += jumps.length * (isKing ? 15.0 : 10.0);
+      if (isMan) {
+        // Promotion incentive
+        final rank = isBlackPiece ? sq ~/ 8 : 7 - (sq ~/ 8);
+        if (rank >= 0 && rank < _promotionBonus.length) {
+          scores.mg += _promotionBonus[rank];
+          scores.eg += _promotionBonus[rank];
         }
-      } catch (e) {
-        // Handle errors gracefully
-      }
-      
-      tempAi = clearBit(tempAi, index);
-    }
-
-    // Opponent threats
-    int tempOpp = boardData.allOpponentPiecesBB;
-    counter = 0;
-    while (tempOpp != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempOpp);
-      if (index < 0 || index >= 64) break;
-      
-      final int r = indexToRow(index);
-      final int c = indexToCol(index);
-      final bool isKing = isSet(boardData.opponentKingsBB, index);
-      
-      try {
-        final jumps = rules.getJumpMoves(BoardPosition(r, c), Piece(type: opponentPlayerType, isKing: isKing), board);
-        if (jumps.isNotEmpty) {
-          threatScore -= jumps.length * (isKing ? 15.0 : 10.0);
+      } else {
+        // King centralization
+        if (sq < _kingCentralization.length) {
+          scores.mg += _kingCentralization[sq];
+          scores.eg += _kingCentralization[sq] * 2;
         }
-      } catch (e) {
-        // Handle errors gracefully
       }
       
-      tempOpp = clearBit(tempOpp, index);
-    }
-
-    return threatScore;
-  }
-
-  // Fast adjacent ally check
-  bool _hasAdjacentAlly(int pieceIndex, int friendlyPiecesBB) {
-    final int r = indexToRow(pieceIndex);
-    final int c = indexToCol(pieceIndex);
-    const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-    
-    for (final d in directions) {
-      final int nr = r + d[0];
-      final int nc = c + d[1];
-      if (_isValidPosition(nr, nc) && isSet(friendlyPiecesBB, rcToIndex(nr, nc))) {
-        return true;
+      // Center control bonus
+      if (sq < _centerBonus.length) {
+        scores.mg += _centerBonus[sq];
+        scores.eg += _centerBonus[sq] ~/ 2;
       }
     }
-    return false;
   }
-
-  // Count adjacent friendly pieces
-  double _countAdjacentFriendly(int pieceIndex, int friendlyPiecesBB) {
-    int count = 0;
-    final int r = indexToRow(pieceIndex);
-    final int c = indexToCol(pieceIndex);
-    const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+  
+  // Simplified mobility evaluation for performance
+  int _evaluateMobilityFast(BitboardState board, PieceType aiType, int aiPieces, int oppPieces) {
+    var mobility = 0;
+    final empty = board.allEmptySquares;
     
-    for (final d in directions) {
-      final int nr = r + d[0];
-      final int nc = c + d[1];
-      if (_isValidPosition(nr, nc) && isSet(friendlyPiecesBB, rcToIndex(nr, nc))) {
+    // Count AI mobility
+    mobility += _countPieceMobility(aiPieces, aiType, empty, board);
+    
+    // Subtract opponent mobility
+    final oppType = aiType == PieceType.black ? PieceType.red : PieceType.black;
+    mobility -= _countPieceMobility(oppPieces, oppType, empty, board);
+    
+    return mobility;
+  }
+  
+  int _countPieceMobility(int pieces, PieceType type, int empty, BitboardState board) {
+    var mobility = 0;
+    var pieceBB = pieces;
+    var safetyCounter = 0;
+    
+    while (pieceBB != 0 && safetyCounter < 32) {
+      final sq = lsbIndex(pieceBB);
+      if (sq < 0 || sq >= 64) break;
+      
+      pieceBB = clearBit(pieceBB, sq);
+      safetyCounter++;
+      
+      mobility += _countMovesSimple(sq, type, empty, board);
+    }
+    
+    return mobility;
+  }
+  
+  int _countMovesSimple(int sq, PieceType type, int empty, BitboardState board) {
+    if (sq < 0 || sq >= 64) return 0;
+    
+    final r = sq ~/ 8, c = sq % 8;
+    var moves = 0;
+    
+    final isKing = (type == PieceType.black) 
+        ? isSet(board.blackKings, sq) 
+        : isSet(board.redKings, sq);
+    
+    if (isKing) {
+      // King moves like rook - simplified check
+      const dirs = [[-1,0], [1,0], [0,-1], [0,1]];
+      for (final dir in dirs) {
+        for (int i = 1; i < 8; i++) {
+          final nr = r + dir[0] * i, nc = c + dir[1] * i;
+          if (nr < 0 || nr > 7 || nc < 0 || nc > 7) break;
+          final targetSq = nr * 8 + nc;
+          if (targetSq < 0 || targetSq >= 64 || !isSet(empty, targetSq)) break;
+          moves++;
+        }
+      }
+    } else {
+      // Man moves - simplified
+      final forward = type == PieceType.black ? 1 : -1;
+      final dirs = [[forward, 0], [0, -1], [0, 1]];
+      for (final dir in dirs) {
+        final nr = r + dir[0], nc = c + dir[1];
+        if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+          final targetSq = nr * 8 + nc;
+          if (targetSq >= 0 && targetSq < 64 && isSet(empty, targetSq)) {
+            moves++;
+          }
+        }
+      }
+    }
+    
+    return moves;
+  }
+  
+  // Simplified threat evaluation
+  int _evaluateThreatsFast(BitboardState board, PieceType aiType, GameRules rules,
+                          int aiPieces, int oppPieces) {
+    var threats = 0;
+    
+    // Simple heuristic: count pieces that can potentially capture
+    // This avoids expensive move generation
+    threats += _countThreateningPieces(aiPieces, aiType, board, true);
+    threats -= _countThreateningPieces(oppPieces, 
+        aiType == PieceType.black ? PieceType.red : PieceType.black, board, false);
+    
+    return threats;
+  }
+  
+  int _countThreateningPieces(int pieces, PieceType type, BitboardState board, bool isAI) {
+    var threats = 0;
+    var pieceBB = pieces;
+    var safetyCounter = 0;
+    
+    while (pieceBB != 0 && safetyCounter < 32) {
+      final sq = lsbIndex(pieceBB);
+      if (sq < 0 || sq >= 64) break;
+      
+      pieceBB = clearBit(pieceBB, sq);
+      safetyCounter++;
+      
+      final isKing = (type == PieceType.black) 
+          ? isSet(board.blackKings, sq) 
+          : isSet(board.redKings, sq);
+      
+      // Simple threat estimation based on position
+      final r = sq ~/ 8, c = sq % 8;
+      if (isKing) {
+        threats += 15; // Kings are generally more threatening
+      } else {
+        threats += 10; // Regular pieces
+        // Bonus for advanced pieces
+        final advancedRank = type == PieceType.black ? r : 7 - r;
+        if (advancedRank > 4) threats += 5;
+      }
+    }
+    
+    return threats;
+  }
+  
+  int _evaluateKingSafety(int aiKings, int oppKings, int aiPieces, int oppPieces) {
+    var safety = 0;
+    
+    // AI king safety
+    var kings = aiKings;
+    var safetyCounter = 0;
+    while (kings != 0 && safetyCounter < 32) {
+      final sq = lsbIndex(kings);
+      if (sq < 0 || sq >= 64) break;
+      
+      kings = clearBit(kings, sq);
+      safetyCounter++;
+      
+      safety += _countAdjacentAllies(sq, aiPieces) * 5;
+      if (isSet(_edgeMask, sq)) safety += 3;
+    }
+    
+    // Opponent king safety
+    kings = oppKings;
+    safetyCounter = 0;
+    while (kings != 0 && safetyCounter < 32) {
+      final sq = lsbIndex(kings);
+      if (sq < 0 || sq >= 64) break;
+      
+      kings = clearBit(kings, sq);
+      safetyCounter++;
+      
+      safety -= _countAdjacentAllies(sq, oppPieces) * 5;
+      if (isSet(_edgeMask, sq)) safety -= 3;
+    }
+    
+    return safety;
+  }
+  
+  int _countAdjacentAllies(int sq, int allies) {
+    final r = sq ~/ 8, c = sq % 8;
+    var count = 0;
+    
+    const dirs = [[-1,0], [1,0], [0,-1], [0,1]];
+    for (final dir in dirs) {
+      final nr = r + dir[0], nc = c + dir[1];
+      if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && isSet(allies, nr * 8 + nc)) {
         count++;
       }
     }
-    return count * 0.25;
+    return count;
   }
+  
+  int _calculatePhase(int pieceCount) {
+    const maxPieces = 24;
+    final phase = (pieceCount * 256) ~/ maxPieces;
+    return phase.clamp(0, 256);
+  }
+  
+  int _taperScore(int mg, int eg, int phase) {
+    return ((mg * phase) + (eg * (256 - phase))) ~/ 256;
+  }
+}
 
-  // King centralization calculation
-  double _calculateKingCentralization(int aiKingsBB, int opponentKingsBB) {
-    double score = 0;
-    
-    int tempAi = aiKingsBB;
-    int counter = 0;
-    while (tempAi != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempAi);
-      if (index < 0 || index >= 64) break;
-      
-      score += _centralizationValues[index];
-      tempAi = clearBit(tempAi, index);
-    }
-    
-    int tempOpp = opponentKingsBB;
-    counter = 0;
-    while (tempOpp != 0 && counter < 32) {
-      counter++;
-      final int index = lsbIndex(tempOpp);
-      if (index < 0 || index >= 64) break;
-      
-      score -= _centralizationValues[index];
-      tempOpp = clearBit(tempOpp, index);
-    }
-    
-    return score;
-  }
-
-  // Static methods for performance monitoring
-  static void logPerformanceStats() {
-    print('Total evaluations: ${_PerformanceTracker._totalEvaluations}');
-    if (_PerformanceTracker._totalEvaluations > 0) {
-      print('Average time per evaluation: ${_PerformanceTracker._globalTimer.elapsedMicroseconds ~/ _PerformanceTracker._totalEvaluations}μs');
-    }
-  }
-
-  static void resetPerformanceTracking() {
-    _PerformanceTracker.reset();
-  }
-
-  static Map<String, int> getCallCounts() {
-    return {
-      'evaluations': _PerformanceTracker._totalEvaluations,
-    };
-  }
+// Helper class for passing scores by reference
+class _EvaluationScores {
+  int mg = 0;
+  int eg = 0;
 }

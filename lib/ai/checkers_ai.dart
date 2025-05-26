@@ -183,8 +183,11 @@ class CheckersAI {
 
     if (childrenStatesAndMoves.isEmpty) {
       bool isAISperspectiveNodePlayer = (currentPlayerForNode == aiPlayerType);
-      if (isAISperspectiveNodePlayer) return -10000.0 - depth;
-      else return 10000.0 + depth;
+      if (isAISperspectiveNodePlayer) {
+        return -10000.0 - depth;
+      } else {
+        return 10000.0 + depth;
+      }
     }
 
     if (isMaximizingPlayer) {
@@ -228,8 +231,8 @@ class CheckersAI {
 
       if (bestMoveFromOverallIterations != null) {
         possibleFirstMovesAndStates.sort((a, b) {
-          bool aIsPrevBest = a.key.from == bestMoveFromOverallIterations!.from && a.key.to == bestMoveFromOverallIterations!.to && a.key.isJump == bestMoveFromOverallIterations!.isJump;
-          bool bIsPrevBest = b.key.from == bestMoveFromOverallIterations!.from && b.key.to == bestMoveFromOverallIterations!.to && b.key.isJump == bestMoveFromOverallIterations!.isJump;
+          bool aIsPrevBest = a.key.from == bestMoveFromOverallIterations!.from && a.key.to == bestMoveFromOverallIterations.to && a.key.isJump == bestMoveFromOverallIterations.isJump;
+          bool bIsPrevBest = b.key.from == bestMoveFromOverallIterations.from && b.key.to == bestMoveFromOverallIterations.to && b.key.isJump == bestMoveFromOverallIterations.isJump;
           if (aIsPrevBest) return -1; if (bIsPrevBest) return 1;
           if (a.key.isJump && !b.key.isJump) return -1; if (!a.key.isJump && b.key.isJump) return 1;
           return 0;
