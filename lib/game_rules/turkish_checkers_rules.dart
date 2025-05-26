@@ -1,7 +1,7 @@
 // lib/game_rules/turkish_checkers_rules.dart
 import 'dart:math';
 import '../models/piece_model.dart';
-import '../models/bitboard_state.dart';
+import '../models/bitboard_state.dart' hide indexToRow, indexToCol;
 import '../utils/bit_utils.dart' hide rcToIndex; // Assumes setBit, clearBit, isSet, rcToIndex, indexToRow, indexToCol
 import 'game_rules.dart';
 import 'game_status.dart';

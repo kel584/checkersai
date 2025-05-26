@@ -1,7 +1,7 @@
 // lib/game_rules/standard_checkers_rules.dart
 import '../models/piece_model.dart';
 import '../models/bitboard_state.dart'; // Import your BitboardState
-import '../utils/bit_utils.dart' hide rcToIndex;     // Import your bit utility functions
+import '../utils/bit_utils.dart' hide rcToIndex, indexToCol, indexToRow;     // Import your bit utility functions
 import 'game_rules.dart';
 import 'game_status.dart';
 import '../ai_evaluators/board_evaluator.dart';

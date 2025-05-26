@@ -1,7 +1,7 @@
 // lib/ai_evaluators/standard_checkers_evaluator.dart
 import 'dart:math';
 import '../models/piece_model.dart';
-import '../models/bitboard_state.dart';
+import '../models/bitboard_state.dart' hide indexToRow, indexToCol, rcToIndex;
 import '../utils/bit_utils.dart'; // For isSet, rcToIndex, indexToRow, indexToCol
 import '../game_rules/game_rules.dart';
 import 'board_evaluator.dart';
