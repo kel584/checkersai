@@ -21,7 +21,7 @@ class AIComputeRequest {
   final BitboardState board; // Now BitboardState
   final PieceType playerType;
   final GameRules rules;
-  final int searchDepth;
+  final int maxSearchDepth;
   final int quiescenceSearchDepth;
   final SendPort replyPort;
 
@@ -29,7 +29,7 @@ class AIComputeRequest {
     required this.board,
     required this.playerType,
     required this.rules,
-    required this.searchDepth,
+    required this.maxSearchDepth,
     required this.quiescenceSearchDepth,
     required this.replyPort,
   });
@@ -49,7 +49,7 @@ void aiIsolateEntry(SendPort mainSendPort) async {
     if (message is AIComputeRequest) {
       final ai = CheckersAI(
         rules: message.rules,
-        searchDepth: message.searchDepth,
+        maxSearchDepth: message.maxSearchDepth,
         quiescenceSearchDepth: message.quiescenceSearchDepth,
       );
       // Pass the BitboardState directly
@@ -99,7 +99,7 @@ class _GameScreenState extends State<GameScreen> {
     super.initState();
     _currentRules = StandardCheckersRules();
     // _ai instance is kept for holding parameters like searchDepth
-    _ai = CheckersAI(rules: _currentRules, searchDepth: 5, quiescenceSearchDepth: 4);
+    _ai = CheckersAI(rules: _currentRules, maxSearchDepth: 8, quiescenceSearchDepth: 4);
     _spawnAiIsolate(); // Spawn the long-lived isolate
     _resetGame();
   }
@@ -344,7 +344,7 @@ class _GameScreenState extends State<GameScreen> {
 
     final request = AIComputeRequest(
       board: boardCopyForAI, playerType: _currentPlayer, rules: _currentRules,
-      searchDepth: _ai.searchDepth, quiescenceSearchDepth: _ai.quiescenceSearchDepth,
+      maxSearchDepth: _ai.maxSearchDepth, quiescenceSearchDepth: _ai.quiescenceSearchDepth,
       replyPort: replyPort.sendPort,
     );
 

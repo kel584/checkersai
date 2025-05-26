@@ -1,52 +1,98 @@
-// lib/ai_evaluators/turkish_checkers_evaluator.dart
-import 'dart:math';
 import 'dart:developer' as developer;
+import 'dart:math';
 import '../models/piece_model.dart';
 import '../models/bitboard_state.dart' hide rcToIndex, indexToCol, indexToRow;
 import '../utils/bit_utils.dart';
 import '../game_rules/game_rules.dart';
 import 'board_evaluator.dart';
 
-/// Optimized Turkish Dama evaluator with reduced logging and improved performance
+/// Fast Turkish Checkers evaluator optimized for opening play
 class TurkishCheckersEvaluator implements BoardEvaluator {
   // Piece values in centipawns
-  static const int _manMg = 100, _manEg = 120;
-  static const int _kingMg = 300, _kingEg = 350;
-  
-  // Evaluation weights with middlegame/endgame tapering
-  static const int _mobilityMg = 4, _mobilityEg = 8;
-  static const int _threatMg = 12, _threatEg = 15;
-  static const int _defenseMg = 6, _defensEg = 4;
-  
-  // Precomputed tables
-  static final List<int> _centerBonus = _initCenterTable();
-  static final List<int> _promotionBonus = [0, 5, 12, 22, 35, 52, 72, 0];
-  static final List<int> _kingCentralization = _initKingTable();
-  
-  // Bitboard masks for fast evaluation
-  static const int _edgeMask = 0xFF818181818181FF;
-  
-  // Add debug flag to control logging
+  static const int _manValue = 100;
+  static const int _kingValue = 280;
+
+  // Evaluation weights (optimized for speed)
+  static const int _promotionThreatEg = 120;
+  static const int _captureBonus = 20;
+  static const int _advancementBonus = 6;
+  static const int _mobilityBonus = 3;
+  static const int _centerBonus = 8;
+
+  // Bitboard masks (precomputed)
+  static const int _blackPromotionRank = 0xFF00000000000000; // Rank 7
+  static const int _redPromotionRank = 0x00000000000000FF;   // Rank 0
+  static const int _centerSquares = 0x0000001818000000;      // Central 4 squares
+  static const int _extendedCenter = 0x00003C3C3C0000;       // Extended center
+  static const int _blackBackRank = 0x00000000000000FF;      // Black's back rank
+  static const int _redBackRank = 0xFF00000000000000;        // Red's back rank
+
+  // Precomputed rank values for advancement scoring
+  static const List<int> _rankValues = [0, 2, 4, 6, 10, 15, 25, 40];
+
+  // Debug flag
   static const bool _enableDebug = false;
-  
-  static List<int> _initCenterTable() {
-    final table = List<int>.filled(64, 0);
-    for (int sq = 0; sq < 64; sq++) {
-      final r = sq ~/ 8, c = sq % 8;
-      final centerDist = max((r - 3.5).abs(), (c - 3.5).abs());
-      table[sq] = (20 - (centerDist * 4)).round().clamp(0, 20);
+
+    // Fast mobility evaluation
+  int _fastMobility(int aiPieces, int oppPieces, int emptySquares) {
+    var aiMobility = 0;
+    var oppMobility = 0;
+    
+    // Count adjacent empty squares for each piece (simplified mobility)
+    var pieces = aiPieces;
+    while (pieces != 0) {
+      final sq = lsbIndex(pieces);
+      if (sq < 0) break;
+      pieces = clearBit(pieces, sq);
+      aiMobility += _countAdjacentEmpty(sq, emptySquares);
     }
-    return table;
+    
+    pieces = oppPieces;
+    while (pieces != 0) {
+      final sq = lsbIndex(pieces);
+      if (sq < 0) break;
+      pieces = clearBit(pieces, sq);
+      oppMobility += _countAdjacentEmpty(sq, emptySquares);
+    }
+    
+    return aiMobility - oppMobility;
+  }
+
+  // Count empty adjacent squares
+  int _countAdjacentEmpty(int sq, int emptySquares) {
+    final r = sq ~/ 8, c = sq % 8;
+    var count = 0;
+    
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    for (final dir in dirs) {
+      final nr = r + dir[0], nc = c + dir[1];
+      if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+        final adjSq = nr * 8 + nc;
+        if (isSet(emptySquares, adjSq)) count++;
+      }
+    }
+    
+    return count;
+  }
+
+  // King activity evaluation
+  int _evaluateKingActivity(int aiKings, int oppKings, bool isBlack) {
+    var score = 0;
+    
+    // Centralization bonus
+    score += popCount(aiKings & _centerSquares) * 20;
+    score -= popCount(oppKings & _centerSquares) * 20;
+    
+    // Activity bonus (not on back rank)
+    final aiBackRank = isBlack ? _blackBackRank : _redBackRank;
+    final oppBackRank = isBlack ? _redBackRank : _blackBackRank;
+    
+    score += popCount(aiKings & ~aiBackRank) * 15;
+    score -= popCount(oppKings & ~oppBackRank) * 15;
+    
+    return score;
   }
   
-  static List<int> _initKingTable() {
-    final table = List<int>.filled(64, 0);
-    for (int sq = 0; sq < 64; sq++) {
-      final r = sq ~/ 8, c = sq % 8;
-      table[sq] = ((7 - (r - 3.5).abs()) + (7 - (c - 3.5).abs())).round();
-    }
-    return table;
-  }
 
   @override
   double evaluate({
@@ -54,295 +100,203 @@ class TurkishCheckersEvaluator implements BoardEvaluator {
     required PieceType aiPlayerType,
     required GameRules rules,
   }) {
-    if (_enableDebug) {
-      developer.log('🔍 Starting evaluation for ${aiPlayerType.toString()}');
-    }
-    
     final isBlack = aiPlayerType == PieceType.black;
     final aiMen = isBlack ? board.blackMen : board.redMen;
     final aiKings = isBlack ? board.blackKings : board.redKings;
     final oppMen = isBlack ? board.redMen : board.blackMen;
     final oppKings = isBlack ? board.redKings : board.blackKings;
-    
+
     final aiPieces = aiMen | aiKings;
     final oppPieces = oppMen | oppKings;
+
+    // Quick termination check
+    if (aiPieces == 0) return oppPieces == 0 ? 0 : -32000;
+    if (oppPieces == 0) return 32000;
+
+    final totalPieces = popCount(aiPieces | oppPieces);
     
-    // Fast termination check
-    if (aiPieces == 0) {
-      return oppPieces == 0 ? 0 : -32000;
-    }
-    if (oppPieces == 0) {
-      return 32000;
-    }
-    
-    final pieceCount = popCount(aiPieces | oppPieces);
-    final phase = _calculatePhase(pieceCount);
-    
-    var mgScore = 0, egScore = 0;
-    
-    // Material and positional evaluation
-    final scores = _EvaluationScores();
-    _evaluatePieces(aiMen, _manMg, _manEg, true, isBlack, scores);
-    _evaluatePieces(aiKings, _kingMg, _kingEg, false, isBlack, scores);
-    _evaluatePieces(oppMen, -_manMg, -_manEg, true, !isBlack, scores);
-    _evaluatePieces(oppKings, -_kingMg, -_kingEg, false, !isBlack, scores);
-    
-    mgScore = scores.mg;
-    egScore = scores.eg;
-    
-    // Lazy evaluation threshold
-    final materialImbalance = (mgScore + egScore) ~/ 2;
-    if (materialImbalance.abs() > 150 && pieceCount > 8) {
-      final lazyScore = _taperScore(mgScore, egScore, phase);
-      if (_enableDebug) {
-        developer.log('⚡ Lazy evaluation: $lazyScore');
-      }
-      return lazyScore.toDouble();
+    // Fast evaluation for opening positions (> 24 pieces)
+    if (totalPieces > 24) {
+      return _fastOpeningEval(aiMen, aiKings, oppMen, oppKings, isBlack);
     }
     
-    // Mobility evaluation (simplified)
-    final mobility = _evaluateMobilityFast(board, aiPlayerType, aiPieces, oppPieces);
-    mgScore += mobility * _mobilityMg ~/ 10;
-    egScore += mobility * _mobilityEg ~/ 10;
+    // Detailed evaluation for middlegame/endgame
+    return _detailedEval(board, aiMen, aiKings, oppMen, oppKings, isBlack, totalPieces, rules);
+  }
+
+  // Ultra-fast evaluation for opening positions
+  double _fastOpeningEval(int aiMen, int aiKings, int oppMen, int oppKings, bool isBlack) {
+    // Material count
+    final aiMenCount = popCount(aiMen);
+    final aiKingCount = popCount(aiKings);
+    final oppMenCount = popCount(oppMen);
+    final oppKingCount = popCount(oppKings);
     
-    // Threat evaluation (simplified)
-    final threats = _evaluateThreatsFast(board, aiPlayerType, rules, aiPieces, oppPieces);
-    mgScore += threats * _threatMg ~/ 10;
-    egScore += threats * _threatEg ~/ 10;
+    var score = (aiMenCount - oppMenCount) * _manValue + 
+                (aiKingCount - oppKingCount) * _kingValue;
+
+    // Quick positional bonuses
+    // Center control
+    final aiCenter = popCount((aiMen | aiKings) & _centerSquares);
+    final oppCenter = popCount((oppMen | oppKings) & _centerSquares);
+    score += (aiCenter - oppCenter) * _centerBonus;
+
+    // Development bonus (pieces off back rank)
+    final aiBackRank = isBlack ? _blackBackRank : _redBackRank;
+    final aiDeveloped = aiMenCount - popCount(aiMen & aiBackRank);
+    final oppBackRank = isBlack ? _redBackRank : _blackBackRank;
+    final oppDeveloped = oppMenCount - popCount(oppMen & oppBackRank);
+    score += (aiDeveloped - oppDeveloped) * 8;
+
+    // Simple advancement scoring
+    score += _fastAdvancement(aiMen, isBlack) - _fastAdvancement(oppMen, !isBlack);
+
+    return score.toDouble().clamp(-500.0, 500.0);
+  }
+
+  // Fast advancement calculation using bitboard operations
+  int _fastAdvancement(int men, bool isBlack) {
+    var score = 0;
+    var pieces = men;
     
-    // King safety
-    if (pieceCount <= 12) {
-      final kingSafety = _evaluateKingSafety(aiKings, oppKings, aiPieces, oppPieces);
-      mgScore += kingSafety * _defenseMg ~/ 10;
-      egScore += kingSafety * _defensEg ~/ 10;
+    for (int rank = 0; rank < 8 && pieces != 0; rank++) {
+      final rankMask = isBlack ? 
+          (0xFF << (rank * 8)) : 
+          (0xFF << ((7 - rank) * 8));
+      final rankPieces = popCount(pieces & rankMask);
+      score += rankPieces * _rankValues[rank];
+      pieces &= ~rankMask; // Remove processed rank
     }
     
-    final finalScore = _taperScore(mgScore, egScore, phase);
-    if (_enableDebug) {
-      developer.log('✅ Final score: $finalScore');
+    return score;
+  }
+
+  // Detailed evaluation for middlegame/endgame
+double _detailedEval(BitboardState board, int aiMen, int aiKings, int oppMen, int oppKings, 
+                    bool isBlack, int totalPieces, GameRules rules) {
+  final aiPieces = aiMen | aiKings;
+  final oppPieces = oppMen | oppKings;
+  
+  // Material evaluation
+  var score = (popCount(aiMen) - popCount(oppMen)) * _manValue + 
+              (popCount(aiKings) - popCount(oppKings)) * _kingValue;
+
+  final isEndgame = totalPieces <= 12;
+
+  // Promotion threats (important in endgame)
+  if (isEndgame || totalPieces <= 20) {
+    final promotionThreat = _evaluatePromotionThreats(oppMen, isBlack);
+    score -= promotionThreat * _promotionThreatEg ~/ 100;
+  }
+
+  // Captures (always important but computed efficiently)
+  final captureScore = _evaluateCaptures(aiPieces, oppPieces, board, isBlack ? PieceType.black : PieceType.red, rules);
+  score += captureScore * _captureBonus ~/ 10;
+
+    // Position evaluation
+    final advancementScore = _fastAdvancement(aiMen, isBlack) - _fastAdvancement(oppMen, !isBlack);
+    score += advancementScore * _advancementBonus ~/ 10;
+
+    // Center control
+    final centerScore = popCount(aiPieces & _extendedCenter) - popCount(oppPieces & _extendedCenter);
+    score += centerScore * _centerBonus;
+
+    // King activity (endgame)
+    if (isEndgame && (popCount(aiKings) > 0 || popCount(oppKings) > 0)) {
+      final kingActivity = _evaluateKingActivity(aiKings, oppKings, isBlack);
+      score += kingActivity;
     }
-    return finalScore.toDouble();
+
+    // Mobility (simplified)
+    if (totalPieces <= 16) {
+      final mobilityScore = _fastMobility(aiPieces, oppPieces, board.allEmptySquares);
+      score += mobilityScore * _mobilityBonus;
+    }
+
+    final maxScore = isEndgame ? 5000 : 1000;
+    return score.toDouble().clamp(-maxScore.toDouble(), maxScore.toDouble());
+  }
+
+  // Fast promotion threat evaluation
+  int _evaluatePromotionThreats(int oppMen, bool isBlack) {
+    var threat = 0;
+    
+    // Check pieces close to promotion
+    for (int rank = 5; rank < 8; rank++) {
+      final rankMask = isBlack ? 
+          (0xFF << (rank * 8)) : 
+          (0xFF << ((7 - rank) * 8));
+      final threateningPieces = popCount(oppMen & rankMask);
+      threat += threateningPieces * (rank == 7 ? 80 : rank == 6 ? 40 : 20);
+    }
+    
+    return threat;
+  }
+
+int _evaluateCaptures(int aiPieces, int oppPieces, BitboardState board, PieceType aiType, GameRules rules) {
+  var score = 0;
+  
+  // Quick capture threat assessment
+  var pieces = aiPieces;
+  var counter = 0;
+  while (pieces != 0 && counter < 32) {
+    final sq = lsbIndex(pieces);
+    if (sq < 0) break;
+    pieces = clearBit(pieces, sq);
+    counter++;
+    
+    score += _countQuickCaptures(sq, board.allEmptySquares, oppPieces);
   }
   
-  void _evaluatePieces(int pieceBB, int mgVal, int egVal, bool isMan, bool isBlackPiece, 
-                      _EvaluationScores scores) {
-    if (pieceBB == 0) return;
+  // Subtract opponent captures
+  pieces = oppPieces;
+  counter = 0;
+  while (pieces != 0 && counter < 32) {
+    final sq = lsbIndex(pieces);
+    if (sq < 0) break;
+    pieces = clearBit(pieces, sq);
+    counter++;
     
-    var pieces = pieceBB;
-    var safetyCounter = 0; // Prevent infinite loops
-    
-    while (pieces != 0 && safetyCounter < 32) {
-      final sq = lsbIndex(pieces);
-      if (sq < 0 || sq >= 64) break;
-      
-      pieces = clearBit(pieces, sq);
-      safetyCounter++;
-      
-      scores.mg += mgVal;
-      scores.eg += egVal;
-      
-      if (isMan) {
-        // Promotion incentive
-        final rank = isBlackPiece ? sq ~/ 8 : 7 - (sq ~/ 8);
-        if (rank >= 0 && rank < _promotionBonus.length) {
-          scores.mg += _promotionBonus[rank];
-          scores.eg += _promotionBonus[rank];
-        }
-      } else {
-        // King centralization
-        if (sq < _kingCentralization.length) {
-          scores.mg += _kingCentralization[sq];
-          scores.eg += _kingCentralization[sq] * 2;
-        }
-      }
-      
-      // Center control bonus
-      if (sq < _centerBonus.length) {
-        scores.mg += _centerBonus[sq];
-        scores.eg += _centerBonus[sq] ~/ 2;
-      }
+    score -= _countQuickCaptures(sq, board.allEmptySquares, aiPieces);
+  }
+  
+  // Bonus for multi-jump potential
+  final aiCaptures = rules.getAllMovesForPlayer(board, aiType, true);
+  for (final entry in aiCaptures.entries) {
+    final destinations = entry.value;
+    if (destinations.length > 1) {
+      score += 10 * (destinations.length - 1); // Integer arithmetic
     }
   }
   
-  // Simplified mobility evaluation for performance
-  int _evaluateMobilityFast(BitboardState board, PieceType aiType, int aiPieces, int oppPieces) {
-    var mobility = 0;
-    final empty = board.allEmptySquares;
-    
-    // Count AI mobility
-    mobility += _countPieceMobility(aiPieces, aiType, empty, board);
-    
-    // Subtract opponent mobility
-    final oppType = aiType == PieceType.black ? PieceType.red : PieceType.black;
-    mobility -= _countPieceMobility(oppPieces, oppType, empty, board);
-    
-    return mobility;
-  }
-  
-  int _countPieceMobility(int pieces, PieceType type, int empty, BitboardState board) {
-    var mobility = 0;
-    var pieceBB = pieces;
-    var safetyCounter = 0;
-    
-    while (pieceBB != 0 && safetyCounter < 32) {
-      final sq = lsbIndex(pieceBB);
-      if (sq < 0 || sq >= 64) break;
-      
-      pieceBB = clearBit(pieceBB, sq);
-      safetyCounter++;
-      
-      mobility += _countMovesSimple(sq, type, empty, board);
-    }
-    
-    return mobility;
-  }
-  
-  int _countMovesSimple(int sq, PieceType type, int empty, BitboardState board) {
-    if (sq < 0 || sq >= 64) return 0;
-    
+  return score;
+}
+
+}
+  // Very fast capture counting
+  int _countQuickCaptures(int sq, int emptySquares, int targets) {
     final r = sq ~/ 8, c = sq % 8;
-    var moves = 0;
+    var captures = 0;
     
-    final isKing = (type == PieceType.black) 
-        ? isSet(board.blackKings, sq) 
-        : isSet(board.redKings, sq);
-    
-    if (isKing) {
-      // King moves like rook - simplified check
-      const dirs = [[-1,0], [1,0], [0,-1], [0,1]];
-      for (final dir in dirs) {
-        for (int i = 1; i < 8; i++) {
-          final nr = r + dir[0] * i, nc = c + dir[1] * i;
-          if (nr < 0 || nr > 7 || nc < 0 || nc > 7) break;
-          final targetSq = nr * 8 + nc;
-          if (targetSq < 0 || targetSq >= 64 || !isSet(empty, targetSq)) break;
-          moves++;
-        }
-      }
-    } else {
-      // Man moves - simplified
-      final forward = type == PieceType.black ? 1 : -1;
-      final dirs = [[forward, 0], [0, -1], [0, 1]];
-      for (final dir in dirs) {
-        final nr = r + dir[0], nc = c + dir[1];
-        if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
-          final targetSq = nr * 8 + nc;
-          if (targetSq >= 0 && targetSq < 64 && isSet(empty, targetSq)) {
-            moves++;
+    // Check 4 directions for captures
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    for (final dir in dirs) {
+      final tr = r + dir[0], tc = c + dir[1];
+      if (tr >= 0 && tr < 8 && tc >= 0 && tc < 8) {
+        final targetSq = tr * 8 + tc;
+        if (isSet(targets, targetSq)) {
+          final jr = tr + dir[0], jc = tc + dir[1];
+          if (jr >= 0 && jr < 8 && jc >= 0 && jc < 8) {
+            final jumpSq = jr * 8 + jc;
+            if (isSet(emptySquares, jumpSq)) {
+              captures++;
+            }
           }
         }
       }
     }
     
-    return moves;
+    return captures;  
   }
-  
-  // Simplified threat evaluation
-  int _evaluateThreatsFast(BitboardState board, PieceType aiType, GameRules rules,
-                          int aiPieces, int oppPieces) {
-    var threats = 0;
-    
-    // Simple heuristic: count pieces that can potentially capture
-    // This avoids expensive move generation
-    threats += _countThreateningPieces(aiPieces, aiType, board, true);
-    threats -= _countThreateningPieces(oppPieces, 
-        aiType == PieceType.black ? PieceType.red : PieceType.black, board, false);
-    
-    return threats;
-  }
-  
-  int _countThreateningPieces(int pieces, PieceType type, BitboardState board, bool isAI) {
-    var threats = 0;
-    var pieceBB = pieces;
-    var safetyCounter = 0;
-    
-    while (pieceBB != 0 && safetyCounter < 32) {
-      final sq = lsbIndex(pieceBB);
-      if (sq < 0 || sq >= 64) break;
-      
-      pieceBB = clearBit(pieceBB, sq);
-      safetyCounter++;
-      
-      final isKing = (type == PieceType.black) 
-          ? isSet(board.blackKings, sq) 
-          : isSet(board.redKings, sq);
-      
-      // Simple threat estimation based on position
-      final r = sq ~/ 8, c = sq % 8;
-      if (isKing) {
-        threats += 15; // Kings are generally more threatening
-      } else {
-        threats += 10; // Regular pieces
-        // Bonus for advanced pieces
-        final advancedRank = type == PieceType.black ? r : 7 - r;
-        if (advancedRank > 4) threats += 5;
-      }
-    }
-    
-    return threats;
-  }
-  
-  int _evaluateKingSafety(int aiKings, int oppKings, int aiPieces, int oppPieces) {
-    var safety = 0;
-    
-    // AI king safety
-    var kings = aiKings;
-    var safetyCounter = 0;
-    while (kings != 0 && safetyCounter < 32) {
-      final sq = lsbIndex(kings);
-      if (sq < 0 || sq >= 64) break;
-      
-      kings = clearBit(kings, sq);
-      safetyCounter++;
-      
-      safety += _countAdjacentAllies(sq, aiPieces) * 5;
-      if (isSet(_edgeMask, sq)) safety += 3;
-    }
-    
-    // Opponent king safety
-    kings = oppKings;
-    safetyCounter = 0;
-    while (kings != 0 && safetyCounter < 32) {
-      final sq = lsbIndex(kings);
-      if (sq < 0 || sq >= 64) break;
-      
-      kings = clearBit(kings, sq);
-      safetyCounter++;
-      
-      safety -= _countAdjacentAllies(sq, oppPieces) * 5;
-      if (isSet(_edgeMask, sq)) safety -= 3;
-    }
-    
-    return safety;
-  }
-  
-  int _countAdjacentAllies(int sq, int allies) {
-    final r = sq ~/ 8, c = sq % 8;
-    var count = 0;
-    
-    const dirs = [[-1,0], [1,0], [0,-1], [0,1]];
-    for (final dir in dirs) {
-      final nr = r + dir[0], nc = c + dir[1];
-      if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && isSet(allies, nr * 8 + nc)) {
-        count++;
-      }
-    }
-    return count;
-  }
-  
-  int _calculatePhase(int pieceCount) {
-    const maxPieces = 24;
-    final phase = (pieceCount * 256) ~/ maxPieces;
-    return phase.clamp(0, 256);
-  }
-  
-  int _taperScore(int mg, int eg, int phase) {
-    return ((mg * phase) + (eg * (256 - phase))) ~/ 256;
-  }
-}
 
-// Helper class for passing scores by reference
-class _EvaluationScores {
-  int mg = 0;
-  int eg = 0;
-}
+

@@ -29,7 +29,7 @@ Future<AIMove?> findBestMoveIsolate(AIFindBestMoveParams params) async{
   // This function runs in the new isolate
   final ai = CheckersAI(
     rules: params.rules,
-    searchDepth: params.searchDepth,
+    maxSearchDepth: params.searchDepth,
     quiescenceSearchDepth: params.quiescenceSearchDepth,
   );
   AIMove? result = ai.findBestMove(params.board, params.playerType);
