@@ -1,12 +1,14 @@
 // Ensure these imports are present
 //import 'package:flutter/foundation.dart'; // For compute
+import 'package:checkersai/models/bitboard_state.dart';
+
 import '../models/piece_model.dart';
 import '../game_rules/game_rules.dart';
 import 'checkers_ai.dart'; // Your CheckersAI class
 
 class AIFindBestMoveParams {
   final GameRules rules;
-  final List<List<Piece?>> board;
+  final BitboardState board;
   final PieceType playerType;
   final int searchDepth;
   final int quiescenceSearchDepth;

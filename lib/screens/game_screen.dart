@@ -1,83 +1,164 @@
 // lib/screens/game_screen.dart
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart'; // For compute (if using isolates for AI)
+import 'dart:isolate'; // For Isolate, SendPort, ReceivePort (if using long-lived isolate)
+import 'dart:async';   // For Completer (if using with long-lived isolate)
 
 import '../models/piece_model.dart';
+import '../models/bitboard_state.dart'; // Import BitboardState
 import '../widgets/board_widget.dart';
-import '../ai/checkers_ai.dart';
+import '../ai/checkers_ai.dart';     // For AIMove, CheckersAI
+// Import your isolate helper if you created one for parameters and top-level function
+// e.g., import '../ai/ai_isolate_helper.dart'; or ensure findBestMoveIsolate is accessible
 import '../game_rules/game_rules.dart';
 import '../game_rules/standard_checkers_rules.dart';
 import '../game_rules/turkish_checkers_rules.dart';
 import '../game_rules/game_status.dart';
-import '../ai/ai_isolate_helper.dart';
 
-const String _kDevPassword = "checkersdev25";
+// If using the long-lived isolate pattern, define message classes and entry point
+// (These might be in a separate ai_isolate_manager.dart or similar)
+class AIComputeRequest {
+  final BitboardState board; // Now BitboardState
+  final PieceType playerType;
+  final GameRules rules;
+  final int searchDepth;
+  final int quiescenceSearchDepth;
+  final SendPort replyPort;
+
+  AIComputeRequest({
+    required this.board,
+    required this.playerType,
+    required this.rules,
+    required this.searchDepth,
+    required this.quiescenceSearchDepth,
+    required this.replyPort,
+  });
+}
+
+class AIComputeResponse {
+  final AIMove? move;
+  AIComputeResponse(this.move);
+}
+
+// Top-level function for the isolate
+void aiIsolateEntry(SendPort mainSendPort) async {
+  final ReceivePort isolateReceivePort = ReceivePort();
+  mainSendPort.send(isolateReceivePort.sendPort);
+
+  await for (var message in isolateReceivePort) {
+    if (message is AIComputeRequest) {
+      final ai = CheckersAI(
+        rules: message.rules,
+        searchDepth: message.searchDepth,
+        quiescenceSearchDepth: message.quiescenceSearchDepth,
+      );
+      // Pass the BitboardState directly
+      final AIMove? bestMove = ai.findBestMove(message.board, message.playerType);
+      message.replyPort.send(AIComputeResponse(bestMove));
+    }
+  }
+}
+
+
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key});
-  
 
   @override
   State<GameScreen> createState() => _GameScreenState();
 }
 
 class _GameScreenState extends State<GameScreen> {
-  bool _isDevAccessGranted = false;
   late GameRules _currentRules;
-  List<List<Piece?>> _boardData = [];
+  late BitboardState _boardData; // CHANGED to BitboardState
   late PieceType _currentPlayer;
   BoardPosition? _selectedPiecePosition;
   Set<BoardPosition> _validMoves = {};
   Map<String, int> _boardStateCounts = {};
-  bool _isAiThinking = false;
 
   bool _isGameOver = false;
   PieceType? _winner;
-  GameEndReason? _gameEndReason; // To store the reason for game end
+  GameEndReason? _gameEndReason;
 
-  late CheckersAI _ai;
+  late CheckersAI _ai; // AI instance itself
   AIMove? _suggestedMove;
+  bool _isAiThinking = false;
+  bool _isBoardFlipped = false;
 
-  bool _isBoardFlipped = false; 
+  // For long-lived isolate
+  Isolate? _aiIsolate;
+  SendPort? _toAiIsolateSendPort;
+  ReceivePort? _fromMainIsolateReceivePort; // Receives the SendPort from the AI isolate initially
+
+  static const String _kDevPassword = "checkersdev25"; // Your dev password
+  bool _isDevAccessGranted = false;
+
 
   @override
   void initState() {
     super.initState();
-    _currentRules = StandardCheckersRules(); // Default to standard checkers
-    _ai = CheckersAI(rules: _currentRules, searchDepth: 6); // Pass current rules, adjust depth as needed
+    _currentRules = StandardCheckersRules();
+    // _ai instance is kept for holding parameters like searchDepth
+    _ai = CheckersAI(rules: _currentRules, searchDepth: 4, quiescenceSearchDepth: 3);
+    _spawnAiIsolate(); // Spawn the long-lived isolate
     _resetGame();
+  }
+
+  Future<void> _spawnAiIsolate() async {
+    if (_aiIsolate != null) return; // Already spawned
+    _fromMainIsolateReceivePort = ReceivePort();
+    try {
+      _aiIsolate = await Isolate.spawn(aiIsolateEntry, _fromMainIsolateReceivePort!.sendPort);
+      final dynamic firstMessage = await _fromMainIsolateReceivePort!.first;
+      if (firstMessage is SendPort) {
+        _toAiIsolateSendPort = firstMessage;
+      } else {
+        print("Error: AI Isolate did not send back its SendPort.");
+      }
+    } catch (e) {
+      print("Error spawning AI isolate: $e");
+    }
+  }
+
+  @override
+  void dispose() {
+    _fromMainIsolateReceivePort?.close();
+    _aiIsolate?.kill(priority: Isolate.immediate);
+    super.dispose();
   }
 
   void _resetGame() {
     setState(() {
-      _boardData = _currentRules.initialBoardSetup();
+      _boardData = _currentRules.initialBoardSetup(); // Returns BitboardState
       _currentPlayer = _currentRules.startingPlayer;
       _selectedPiecePosition = null;
       _validMoves = {};
       _isGameOver = false;
       _winner = null;
-      _gameEndReason = null; // Reset game end reason
+      _gameEndReason = null;
       _suggestedMove = null;
-      _boardStateCounts = {}; // Reset history
-      // Add initial board state to history
+      _boardStateCounts = {};
       String initialHash = _currentRules.generateBoardStateHash(_boardData, _currentPlayer);
       _boardStateCounts[initialHash] = 1;
+      _isDevAccessGranted = false; // Reset dev access for AI suggestion
     });
   }
 
   void _changeGameVariant(GameRules newRules) {
     setState(() {
       _currentRules = newRules;
-      _ai = CheckersAI(rules: _currentRules, searchDepth: 6); // Re-initialize AI with new rules
+      // AI parameters are stored in _ai, but the 'rules' for computation are passed with each request
+      // If _ai itself needs to change based on rules (e.g. different default depths), update _ai here.
+      // For now, _ai.searchDepth and _ai.quiescenceSearchDepth are used from the existing _ai instance.
       _resetGame();
     });
   }
 
   void _handleSquareTap(int row, int col) {
-    if (_isGameOver) return;
+    if (_isGameOver || _isAiThinking) return;
 
     final tappedPosition = BoardPosition(row, col);
     final Map<BoardPosition, Set<BoardPosition>> allTurnJumps =
-        _currentRules.getAllMovesForPlayer(_boardData, _currentPlayer, true); // true for jumpsOnly
+        _currentRules.getAllMovesForPlayer(_boardData, _currentPlayer, true);
     final bool jumpsAreMandatoryThisTurn = allTurnJumps.isNotEmpty;
 
     setState(() {
@@ -85,10 +166,9 @@ class _GameScreenState extends State<GameScreen> {
         _suggestedMove = null;
       }
 
-      final pieceOnTappedSquare = _boardData[row][col];
+      final Piece? pieceOnTappedSquare = _boardData.getPieceAt(row, col); // Use getPieceAt
 
       if (_selectedPiecePosition == null) {
-        // === Trying to select a piece ===
         if (pieceOnTappedSquare != null && pieceOnTappedSquare.type == _currentPlayer) {
           if (jumpsAreMandatoryThisTurn) {
             if (allTurnJumps.containsKey(tappedPosition)) {
@@ -102,16 +182,15 @@ class _GameScreenState extends State<GameScreen> {
             }
           } else {
             _selectedPiecePosition = tappedPosition;
+            // getRegularMoves needs Piece details, which we got from getPieceAt
             _validMoves = _currentRules.getRegularMoves(tappedPosition, pieceOnTappedSquare, _boardData);
           }
         }
-      } else {
-        // === A piece IS ALREADY SELECTED (_selectedPiecePosition is not null) ===
+      } else { // A piece IS ALREADY SELECTED
         if (tappedPosition == _selectedPiecePosition) {
           _selectedPiecePosition = null;
           _validMoves = {};
         } else if (pieceOnTappedSquare != null && pieceOnTappedSquare.type == _currentPlayer) {
-          // Tapped another of current player's pieces: Try to switch selection
           if (jumpsAreMandatoryThisTurn) {
             if (allTurnJumps.containsKey(tappedPosition)) {
               _selectedPiecePosition = tappedPosition;
@@ -126,38 +205,36 @@ class _GameScreenState extends State<GameScreen> {
             _validMoves = _currentRules.getRegularMoves(tappedPosition, pieceOnTappedSquare, _boardData);
           }
         } else if (_validMoves.contains(tappedPosition)) {
-          // Tapped a valid move square
           MoveResult result = _currentRules.applyMoveAndGetResult(
-            currentBoard: _boardData,
+            currentBoard: _boardData, // Pass BitboardState
             from: _selectedPiecePosition!,
             to: tappedPosition,
             currentPlayer: _currentPlayer,
           );
-          _boardData = result.board;
+          _boardData = result.board; // Receives BitboardState
 
           if (result.turnChanged) {
             _selectedPiecePosition = null;
             _validMoves = {};
             _currentPlayer = (_currentPlayer == PieceType.red) ? PieceType.black : PieceType.red;
             _updateAndCheckGameState();
-          } else {
-            // Multi-jump scenario
+          } else { // Multi-jump
             _selectedPiecePosition = tappedPosition;
-            final pieceThatMoved = _boardData[tappedPosition.row][tappedPosition.col];
+            final pieceThatMoved = _boardData.getPieceAt(tappedPosition.row, tappedPosition.col);
             if (pieceThatMoved != null) {
               _validMoves = _currentRules.getFurtherJumps(tappedPosition, pieceThatMoved, _boardData);
               if (_validMoves.isEmpty) {
-                _selectedPiecePosition = null; // No more jumps, turn ends
+                _selectedPiecePosition = null;
                 _currentPlayer = (_currentPlayer == PieceType.red) ? PieceType.black : PieceType.red;
                 _updateAndCheckGameState();
               }
-            } else { // Should not happen
+            } else {
               _selectedPiecePosition = null;
               _currentPlayer = (_currentPlayer == PieceType.red) ? PieceType.black : PieceType.red;
               _updateAndCheckGameState();
             }
           }
-        } else { // Tapped an invalid square
+        } else {
           _selectedPiecePosition = null;
           _validMoves = {};
         }
@@ -175,10 +252,10 @@ class _GameScreenState extends State<GameScreen> {
         (allJumps.isEmpty) ? _currentRules.getAllMovesForPlayer(_boardData, _currentPlayer, false) : {};
 
     GameStatus status = _currentRules.checkWinCondition(
-      board: _boardData,
+      currentBoard: _boardData, // Pass BitboardState
       currentPlayer: _currentPlayer,
-      allPossibleJumps: allJumps,
-      allPossibleRegularMoves: allRegularMoves,
+      allPossibleJumpsForCurrentPlayer: allJumps,
+      allPossibleRegularMovesForCurrentPlayer: allRegularMoves,
       boardStateCounts: _boardStateCounts,
     );
 
@@ -186,268 +263,218 @@ class _GameScreenState extends State<GameScreen> {
       setState(() {
         _isGameOver = true;
         _winner = status.winner;
-        _gameEndReason = status.reason; // Store the reason
+        _gameEndReason = status.reason;
       });
     }
   }
-Future<String?> _showPasswordDialog(BuildContext context) async {
-  final TextEditingController passwordController = TextEditingController();
-  return showDialog<String>(
-    context: context,
-    barrierDismissible: true,
-    builder: (BuildContext dialogContext) {
-      return AlertDialog(
-        title: const Text('Developer AI Access'),
-        content: SingleChildScrollView(
-          child: ListBody(
-            children: <Widget>[
+
+  Future<String?> _showPasswordDialog(BuildContext context) async {
+    final TextEditingController passwordController = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text('Developer AI Access'),
+          content: SingleChildScrollView(
+            child: ListBody(children: <Widget>[
               const Text('Enter the developer password to get an AI suggestion.'),
               const SizedBox(height: 10),
               TextField(
-                controller: passwordController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  hintText: "Password",
-                  border: OutlineInputBorder(),
-                ),
-                // autofocus: true, // Let's try removing or commenting this out
-                onSubmitted: (_) { // Allow submitting with enter key
-                   Navigator.of(dialogContext).pop(passwordController.text);
-                },
+                controller: passwordController, obscureText: true,
+                decoration: const InputDecoration(hintText: "Password", border: OutlineInputBorder()),
+                // autofocus: false, // Keep autofocus off if it caused issues
+                onSubmitted: (_) { Navigator.of(dialogContext).pop(passwordController.text);},
               ),
-            ],
+            ]),
           ),
-        ),
-        actions: <Widget>[
-          TextButton(
-            child: const Text('Cancel'),
-            onPressed: () {
-              Navigator.of(dialogContext).pop(null);
-            },
-          ),
-          ElevatedButton(
-            child: const Text('Submit'),
-            onPressed: () {
-              Navigator.of(dialogContext).pop(passwordController.text);
-            },
-          ),
-        ],
-      );
-    },
-  );
-}
-void _getAISuggestion() {
-  AIMove? bestMove = _ai.findBestMove(_boardData, _currentPlayer);
-  if (!mounted) return; // Check if the widget is still in the tree
-
-  setState(() {
-    _suggestedMove = bestMove;
-    if (bestMove == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text(
-                "AI (${_currentRules.gameVariantName}) found no moves for $_currentPlayer."),
-            duration: const Duration(seconds: 2)),
-      );
-    }
-  });
-}
-void _onAIAssistPressed() async {
-  if (_isGameOver) {
-    _resetGame();
-    return;
-  }
-  if (_isAiThinking) return; // Prevent multiple simultaneous calls
-
-  setState(() {
-    _isAiThinking = true; // For showing a loading indicator
-    _suggestedMove = null;
-  });
-
-  final List<List<Piece?>> boardCopyForAI =
-      _boardData.map((row) => List<Piece?>.from(row)).toList();
-
-  final params = AIFindBestMoveParams(
-    rules: _currentRules, // Pass the current rules object
-    board: boardCopyForAI,
-    playerType: _currentPlayer,
-    searchDepth: _ai.searchDepth, // Get from your configured AI instance
-    quiescenceSearchDepth: _ai.quiescenceSearchDepth,
-  );
-
-  try {
-    AIMove? bestMove = await compute(findBestMoveIsolate, params);
-
-    if (!mounted) return;
-    setState(() {
-      _suggestedMove = bestMove;
-      if (bestMove == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(
-                  "AI (${_currentRules.gameVariantName}) found no moves for $_currentPlayer."),
-              duration: const Duration(seconds: 2)),
+          actions: <Widget>[
+            TextButton(child: const Text('Cancel'), onPressed: () => Navigator.of(dialogContext).pop(null)),
+            ElevatedButton(child: const Text('Submit'), onPressed: () => Navigator.of(dialogContext).pop(passwordController.text)),
+          ],
         );
+      },
+    );
+  }
+
+  void _onAIAssistPressed() async {
+    if (_isGameOver) {
+      _resetGame();
+      return;
+    }
+    if (_isAiThinking) return;
+
+    if (!_isDevAccessGranted) {
+      final String? enteredPassword = await _showPasswordDialog(context);
+      if (enteredPassword == null || !mounted) return;
+      if (enteredPassword == _kDevPassword) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Developer AI access granted for this game."), duration: Duration(seconds: 2)),
+        );
+        setState(() { _isDevAccessGranted = true; });
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Incorrect password."), duration: Duration(seconds: 2)),
+        );
+        return;
       }
-    });
-  } catch (e) {
-    print("AI computation error: $e");
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error during AI calculation: $e")),
-      );
     }
-  } finally {
-    if (mounted) {
-      setState(() {
-        _isAiThinking = false; // Hide loading indicator
-      });
+    
+    // Proceed with AI suggestion if access is granted
+    setState(() { _isAiThinking = true; _suggestedMove = null; });
+
+    if (_toAiIsolateSendPort == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("AI engine not ready. Retrying initialization...")));
+        await _spawnAiIsolate(); // Try to respawn if not ready
+        if(_toAiIsolateSendPort == null && mounted) {
+           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("AI engine failed to initialize.")));
+           setState(() => _isAiThinking = false);
+           return;
+        }
+      } else { return; }
+    }
+
+
+    final ReceivePort replyPort = ReceivePort();
+    final BitboardState boardCopyForAI = _boardData.copy();
+
+    final request = AIComputeRequest(
+      board: boardCopyForAI, playerType: _currentPlayer, rules: _currentRules,
+      searchDepth: _ai.searchDepth, quiescenceSearchDepth: _ai.quiescenceSearchDepth,
+      replyPort: replyPort.sendPort,
+    );
+
+    _toAiIsolateSendPort!.send(request);
+
+    try {
+      final dynamic response = await replyPort.first.timeout(const Duration(seconds: 60));
+      if (response is AIComputeResponse) {
+        if (!mounted) return;
+        setState(() { _suggestedMove = response.move; });
+        if (response.move == null && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("AI (${_currentRules.gameVariantName}) found no moves or timed out.")),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("AI Error: $e")));
+    } finally {
+      replyPort.close();
+      if (mounted) setState(() => _isAiThinking = false);
     }
   }
-}
 
-  // In _GameScreenState class (lib/screens/game_screen.dart)
+  @override
+  Widget build(BuildContext context) {
+    String appBarTitle = _currentRules.gameVariantName;
+    String gameStatusText = "";
+    Color appBarColor = Colors.brown[700]!;
+    Color gameStatusMessageColor = Theme.of(context).textTheme.bodyLarge?.color ?? Colors.black;
 
-@override
-Widget build(BuildContext context) {
-  String appBarTitle = _currentRules.gameVariantName;
-  String gameStatusMessage = "";
-  Color appBarColor = Colors.brown[700]!; // Default color
-  Color gameStatusMessageColor = Theme.of(context).textTheme.bodyLarge?.color ?? Colors.black;
-
-  if (_isGameOver) {
-    if (_winner != null) {
-      appBarTitle = "${_winner.toString().split('.').last.toUpperCase()} Wins! (${_currentRules.gameVariantName})";
-      gameStatusMessage = "${_winner.toString().split('.').last.toUpperCase()} Wins by ${_gameEndReason?.toString().split('.').last.replaceAllMapped(RegExp(r'([A-Z])'), (match) => ' ${match.group(1)}').trim() ?? 'Unknown'}!";
-      appBarColor = _winner == PieceType.red ? Colors.red[900]! : Colors.black87;
-      gameStatusMessageColor = _winner == PieceType.red ? Colors.red[900]! : Colors.black87;
-    } else { // It's a draw
-      appBarTitle = "Draw! (${_currentRules.gameVariantName})";
-      // Ensure _gameEndReason is used for specific draw reason
-      gameStatusMessage = "Draw by ${_gameEndReason?.toString().split('.').last.replaceAllMapped(RegExp(r'([A-Z])'), (match) => ' ${match.group(1)}').trim() ?? 'Unknown'}!";
-      appBarColor = Colors.blueGrey[700]!;
-      gameStatusMessageColor = Colors.blueGrey[900]!;
+    if (_isGameOver) {
+      if (_winner != null) {
+        appBarTitle = "${_winner!.name.toUpperCase()} Wins! (${_currentRules.gameVariantName})";
+        gameStatusText = "${_winner!.name.toUpperCase()} Wins by ${_gameEndReason?.name ?? 'Unknown'}!";
+        appBarColor = _winner == PieceType.red ? Colors.red[900]! : Colors.black87;
+        gameStatusMessageColor = appBarColor;
+      } else { // Draw
+        appBarTitle = "Draw! (${_currentRules.gameVariantName})";
+        gameStatusText = "Draw by ${_gameEndReason?.name ?? 'Unknown'}!";
+        appBarColor = Colors.blueGrey[700]!;
+        gameStatusMessageColor = Colors.blueGrey[900]!;
+      }
+    } else {
+      appBarTitle = '${_currentRules.gameVariantName} - ${_currentPlayer.name.toUpperCase()}\'s Turn';
     }
-  } else {
-    appBarTitle = '${_currentRules.gameVariantName} - ${_currentPlayer.toString().split('.').last.toUpperCase()}\'s Turn';
-  }
 
-  return Scaffold(
-    appBar: AppBar(
-      title: Text(appBarTitle),
-      backgroundColor: appBarColor,
-      actions: <Widget>[
-        IconButton(
-          icon: Icon(_isBoardFlipped ? Icons.flip_camera_android_outlined : Icons.flip_camera_android),
-          tooltip: "Flip Board",
-          onPressed: () {
-            // if (!_isGameOver) { // You can decide if flipping is allowed when game is over
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(appBarTitle),
+        backgroundColor: appBarColor,
+        actions: <Widget>[
+          IconButton(
+            icon: Icon(_isBoardFlipped ? Icons.flip_camera_android_outlined : Icons.flip_camera_android),
+            tooltip: "Flip Board",
+            onPressed: () {
               setState(() {
                 _isBoardFlipped = !_isBoardFlipped;
-                _selectedPiecePosition = null; // Clear selection when board flips
-                _validMoves = {};
-                _suggestedMove = null;
+                _selectedPiecePosition = null; _validMoves = {}; _suggestedMove = null;
               });
-            // }
-          },
-        ),
-        if (!_isGameOver) // Only show variant settings if game is not over
-          PopupMenuButton<GameRules>(
-            icon: const Icon(Icons.settings_applications),
-            tooltip: "Change Game Variant",
-            onSelected: (GameRules selectedRules) {
-              if (_currentRules.gameVariantName != selectedRules.gameVariantName) {
-                _changeGameVariant(selectedRules);
-              }
             },
-            itemBuilder: (BuildContext context) => <PopupMenuEntry<GameRules>>[
-              PopupMenuItem<GameRules>(
-                value: StandardCheckersRules(),
-                child: Text(StandardCheckersRules().gameVariantName),
-              ),
-              PopupMenuItem<GameRules>(
-                value: TurkishCheckersRules(),
-                child: Text(TurkishCheckersRules().gameVariantName),
-              ),
-              // Add other game rules here as you create them
-            ],
           ),
-      ],
-    ),
-    body: SafeArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: <Widget>[
-          Expanded(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    double potentialSize = constraints.maxWidth < constraints.maxHeight
-                        ? constraints.maxWidth
-                        : constraints.maxHeight;
-                    // Ensure boardSize is not zero to prevent division by zero in BoardWidget if potentialSize is tiny
-                    double boardSize = (potentialSize > 0) ? potentialSize : 100.0; // Min size 100 if no constraints
-
-                    if (_boardData.isEmpty && !_isGameOver) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-
+          if (!_isGameOver)
+            PopupMenuButton<GameRules>(
+              icon: const Icon(Icons.settings_applications),
+              tooltip: "Change Game Variant",
+              onSelected: (GameRules selectedRules) {
+                if (_currentRules.gameVariantName != selectedRules.gameVariantName) {
+                  _changeGameVariant(selectedRules);
+                }
+              },
+              itemBuilder: (BuildContext context) => <PopupMenuEntry<GameRules>>[
+                PopupMenuItem<GameRules>(value: StandardCheckersRules(), child: Text(StandardCheckersRules().gameVariantName)),
+                PopupMenuItem<GameRules>(value: TurkishCheckersRules(), child: Text(TurkishCheckersRules().gameVariantName)),
+              ],
+            ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: <Widget>[
+            Expanded(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: LayoutBuilder(builder: (context, constraints) {
+                    double potentialSize = constraints.maxWidth < constraints.maxHeight ? constraints.maxWidth : constraints.maxHeight;
+                    double boardSize = (potentialSize > 0) ? potentialSize : 100.0;
+                    // _boardData is now BitboardState
                     return BoardWidget(
-                      boardData: _boardData,
+                      boardData: _boardData, // Pass BitboardState
                       boardSize: boardSize,
-                      onSquareTap: _isGameOver ? (r, c) {} : _handleSquareTap, // Disable taps if game is over
+                      onSquareTap: _isGameOver || _isAiThinking ? (r, c) {} : _handleSquareTap,
                       selectedPiecePosition: _selectedPiecePosition,
                       validMoves: _validMoves,
                       suggestedMoveFrom: _suggestedMove?.from,
                       suggestedMoveTo: _suggestedMove?.to,
-                      isBoardFlipped: _isBoardFlipped, // Pass the flip state
-                      // Optional: Pass piecesOnDarkSquaresOnly if BoardWidget needs it for visuals
-                      // piecesOnDarkSquaresOnly: _currentRules.piecesOnDarkSquaresOnly,
+                      isBoardFlipped: _isBoardFlipped,
+                      // piecesOnDarkSquaresOnly: _currentRules.piecesOnDarkSquaresOnly, // If BoardWidget uses this
                     );
-                  },
+                  }),
                 ),
               ),
             ),
-          ),
-          if (_isGameOver)
+            if (_isGameOver)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16.0),
+                child: Text(gameStatusText, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: gameStatusMessageColor), textAlign: TextAlign.center),
+              ),
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16.0),
-              child: Text(
-                gameStatusMessage,
-                style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: gameStatusMessageColor),
-                textAlign: TextAlign.center,
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!_isGameOver)
+                    Text("${_currentPlayer.name.toUpperCase()}'s Turn", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _currentPlayer == PieceType.red ? Colors.red[700] : Colors.black87)),
+                  const SizedBox(height: 10),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12), textStyle: const TextStyle(fontSize: 16)),
+                    onPressed: _isAiThinking ? null : _onAIAssistPressed,
+                    child: _isAiThinking 
+                           ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                           : Text(_isGameOver ? 'Play Again' : 'Get AI Suggestion'),
+                  ),
+                ],
               ),
             ),
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!_isGameOver)
-                  Text(
-                    "${_currentPlayer.toString().split('.').last.toUpperCase()}'s Turn",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _currentPlayer == PieceType.red ? Colors.red[700] : Colors.black87),
-                  ),
-                const SizedBox(height: 10),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                    textStyle: const TextStyle(fontSize: 16),
-                  ),
-                  onPressed: _onAIAssistPressed, // This handles both AI assist and Play Again
-                  child: Text(_isGameOver ? 'Play Again' : 'Get AI Suggestion'),
-                ),
-              ],
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
 }

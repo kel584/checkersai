@@ -1,16 +1,21 @@
 // lib/game_rules/turkish_checkers_rules.dart
+import 'dart:math';
 import '../models/piece_model.dart';
+import '../models/bitboard_state.dart';
+import '../utils/bit_utils.dart' hide rcToIndex; // Assumes setBit, clearBit, isSet, rcToIndex, indexToRow, indexToCol
 import 'game_rules.dart';
 import 'game_status.dart';
-import '../ai_evaluators/turkish_checkers_evaluator.dart';
 import '../ai_evaluators/board_evaluator.dart';
+import '../ai_evaluators/turkish_checkers_evaluator.dart';
 
+
+// Re-defining FullCaptureSequence here for self-containment, or import if in its own file
 class FullCaptureSequence {
   final BoardPosition initialFromPos;
-  final BoardPosition firstStepToPos; // The landing spot of the very first jump
-  final List<BoardPosition> fullPath; // The sequence of squares the jumping piece lands on
+  final BoardPosition firstStepToPos;
+  final List<BoardPosition> fullPath; // Sequence of landing squares, starting from initialFromPos
   final int numCaptures;
-  final List<List<Piece?>> finalBoardState; // Board state after this sequence
+  final BitboardState finalBoardState; // Board state after this sequence
 
   FullCaptureSequence({
     required this.initialFromPos,
@@ -23,549 +28,509 @@ class FullCaptureSequence {
 
 class TurkishCheckersRules extends GameRules {
   @override
-  String get gameVariantName => "Turkish Checkers";
+  String get gameVariantName => "Turkish Checkers (Bitboard)";
 
   @override
-  PieceType get startingPlayer => PieceType.red; // Or PieceType.black, traditionally White starts
+  PieceType get startingPlayer => PieceType.red; // Traditionally White (often represented by Red)
 
   @override
   bool get piecesOnDarkSquaresOnly => false; // Pieces use all squares
 
+  // --- Bitboard Masks ---
+  static const int _notAFile = 0xFEFEFEFEFEFEFEFE; // ~0x0101010101010101
+  static const int _notHFile = 0x7F7F7F7F7F7F7F7F; // ~0x8080808080808080
+  static const int _notRank1 = ~0x00000000000000FF; // For pieces moving "up" (Red)
+  static const int _notRank8 = ~0xFF00000000000000; // For pieces moving "down" (Black)
+  // For jumps (2 squares away)
+  static const int _notABFile = 0xFCFCFCFCFCFCFCFC; // ~0x0303030303030303
+  static const int _notGHFile = 0x3F3F3F3F3F3F3F3F; // ~0xC0C0C0C0C0C0C0C0
+  static const int _notRank12 = ~0x000000000000FFFF;
+  static const int _notRank78 = ~0xFFFF000000000000;
+
+
   @override
-  List<List<Piece?>> initialBoardSetup() {
-    List<List<Piece?>> board = List.generate(8, (_) => List.filled(8, null, growable: false));
-
-    // Player Black (e.g., at the "top" of the board view, rows 1 and 2 if 0-indexed)
-    // Standard Dama setup: pieces on 2nd and 3rd ranks for each player
-    // Let's say rows 1 and 2 for Black, and rows 5 and 6 for Red (if Red is at bottom)
-    for (int r = 1; r <= 2; r++) { // Ranks 2 and 3
+  BitboardState initialBoardSetup() {
+    BitboardState bs = BitboardState();
+    // Black pieces (e.g., player starting at "top", rows 1 and 2)
+    for (int r = 1; r <= 2; r++) {
       for (int c = 0; c < 8; c++) {
-        board[r][c] = Piece(type: PieceType.black);
+        bs.blackMen = setBit(bs.blackMen, rcToIndex(r, c));
       }
     }
-
-    // Player Red (e.g., at the "bottom", rows 5 and 6)
-    for (int r = 5; r <= 6; r++) { // Ranks 6 and 7 from player's perspective (board rows 5 & 6)
+    // Red pieces (e.g., player starting at "bottom", rows 5 and 6)
+    for (int r = 5; r <= 6; r++) {
       for (int c = 0; c < 8; c++) {
-        board[r][c] = Piece(type: PieceType.red);
+        bs.redMen = setBit(bs.redMen, rcToIndex(r, c));
       }
     }
-    return board;
+    return bs;
   }
 
-  bool _isValidPosition(int r, int c) {
+  bool _isValidPosition(int r, int c) { // Keep this helper for array-based logic if any persists
     return r >= 0 && r < 8 && c >= 0 && c < 8;
   }
 
-  
-
-  // --- Movement and Capture Logic for Turkish Checkers ---
-List<FullCaptureSequence> _findAllCaptureSequencesForPiece(
-  BoardPosition currentPiecePos, // Current position of the piece being evaluated
-  Piece piece,                   // The current state of the piece
-  List<List<Piece?>> boardState, // The board state *before* jumps from currentPiecePos
-  PieceType activePlayer,        // The player whose piece is jumping
-  List<BoardPosition> pathSoFar, // Path of squares the piece has landed on, STARTS with initial 'from' pos
-  int capturesSoFar,
-) {
-  List<FullCaptureSequence> allFoundSequences = [];
-
-  Set<BoardPosition> nextImmediateJumps =
-      getJumpMoves(currentPiecePos, piece, boardState);
-
-  if (nextImmediateJumps.isEmpty) {
-    // Base case: No more jumps from this position.
-    if (capturesSoFar > 0) {
-      // pathSoFar includes the initial starting position and all subsequent landing spots.
-      // currentPiecePos is the final landing spot and is already the last element of pathSoFar here.
-      allFoundSequences.add(FullCaptureSequence(
-        initialFromPos: pathSoFar.first,
-        firstStepToPos: pathSoFar.length > 1 
-            ? pathSoFar[1] 
-            : currentPiecePos, // Should be pathSoFar[1] if capturesSoFar > 0. This case needs care if pathSoFar only has 1 element.
-                               // If capturesSoFar=1, pathSoFar is [initialPos, currentPiecePos (first landing)]
-                               // So pathSoFar[1] is correct.
-        fullPath: pathSoFar, 
-        numCaptures: capturesSoFar,
-        finalBoardState: boardState,
-      ));
-    }
-  } else {
-    // Recursive step: Explore each possible next jump
-    for (BoardPosition nextLandingPos in nextImmediateJumps) {
-      List<List<Piece?>> boardAfterThisJumpStep =
-          boardState.map((row) => List<Piece?>.from(row)).toList();
-      Piece pieceAfterThisJumpStep = Piece(type: piece.type, isKing: piece.isKing);
-
-      BoardPosition? capturedPiecePos;
-      if (pieceAfterThisJumpStep.isKing) {
-        int dr = (nextLandingPos.row - currentPiecePos.row).sign;
-        int dc = (nextLandingPos.col - currentPiecePos.col).sign;
-        int opponentPiecesOnPath = 0;
-        int friendlyPiecesOnPath = 0;
-
-        int checkR = currentPiecePos.row + dr;
-        int checkC = currentPiecePos.col + dc;
-        while (checkR != nextLandingPos.row || checkC != nextLandingPos.col) {
-          if (!_isValidPosition(checkR, checkC)) break;
-          Piece? p = boardAfterThisJumpStep[checkR][checkC];
-          if (p != null) {
-            if (p.type != activePlayer) {
-              opponentPiecesOnPath++;
-              if (opponentPiecesOnPath == 1) capturedPiecePos = BoardPosition(checkR, checkC);
-              else { capturedPiecePos = null; break; }
-            } else {
-              friendlyPiecesOnPath++; break;
-            }
-          }
-          checkR += dr;
-          checkC += dc;
-        }
-        if (friendlyPiecesOnPath > 0 || opponentPiecesOnPath != 1) capturedPiecePos = null;
-      } else { // Man
-        int capR = currentPiecePos.row + (nextLandingPos.row - currentPiecePos.row) ~/ 2;
-        int capC = currentPiecePos.col + (nextLandingPos.col - currentPiecePos.col) ~/ 2;
-        // Assuming getJumpMoves validated the piece at (capR, capC)
-        capturedPiecePos = BoardPosition(capR, capC);
-      }
-
-      if (capturedPiecePos != null && 
-          _isValidPosition(capturedPiecePos.row, capturedPiecePos.col) && // Check validity of capturedPiecePos
-          boardAfterThisJumpStep[capturedPiecePos.row][capturedPiecePos.col] != null &&
-          boardAfterThisJumpStep[capturedPiecePos.row][capturedPiecePos.col]!.type != activePlayer) {
-           boardAfterThisJumpStep[capturedPiecePos.row][capturedPiecePos.col] = null;
-      } else {
-          // This jump is invalid or the captured piece is not as expected.
-          // This branch path should not result in a valid sequence.
-          // print("Error in jump simulation: No valid piece to capture for move from $currentPiecePos to $nextLandingPos via $capturedPiecePos");
-          continue; // Skip to the next potential jump in nextImmediateJumps
-      }
-
-      boardAfterThisJumpStep[nextLandingPos.row][nextLandingPos.col] = pieceAfterThisJumpStep;
-      boardAfterThisJumpStep[currentPiecePos.row][currentPiecePos.col] = null;
-
-      if (_shouldBecomeKing(nextLandingPos, pieceAfterThisJumpStep)) {
-        pieceAfterThisJumpStep.isKing = true;
-      }
-
-      // Create the path for the next recursive call
-      List<BoardPosition> nextPath = List.from(pathSoFar)..add(nextLandingPos);
-
-      allFoundSequences.addAll(_findAllCaptureSequencesForPiece(
-        nextLandingPos,
-        pieceAfterThisJumpStep,
-        boardAfterThisJumpStep,
-        activePlayer,
-        nextPath, // Use the correctly named variable
-        capturesSoFar + 1,
-      ));
-    }
+  // Helper to get piece details from bitboards at a given index
+  Piece? _getPieceDetailsAtIndex(BitboardState board, int index) {
+    if (isSet(board.blackMen, index)) return Piece(type: PieceType.black, isKing: false);
+    if (isSet(board.blackKings, index)) return Piece(type: PieceType.black, isKing: true);
+    if (isSet(board.redMen, index)) return Piece(type: PieceType.red, isKing: false);
+    if (isSet(board.redKings, index)) return Piece(type: PieceType.red, isKing: true);
+    return null;
   }
-  return allFoundSequences;
-}
+
+  // --- START OF BITBOARD MOVE GENERATION ---
+
+  // Note: The GameRules interface has getRegularMoves/getJumpMoves for a SINGLE piece.
+  // Bitboard logic is often more efficient generating all moves for a TYPE of piece.
+  // We'll implement the interface methods, but they might call internal helpers
+  // that generate moves for a single piece from its bit.
 
   @override
   Set<BoardPosition> getRegularMoves(
-      BoardPosition piecePos, Piece piece, List<List<Piece?>> board) {
+      BoardPosition piecePos, Piece pieceDetails, BitboardState currentBoard) {
     Set<BoardPosition> moves = {};
-    int r = piecePos.row;
-    int c = piecePos.col;
+    final int fromIndex = rcToIndex(piecePos.row, piecePos.col);
+    final int empty = currentBoard.allEmptySquares;
 
-    if (piece.isKing) { // King (Dama) movement - like a rook
-      const List<List<int>> directions = [[-1, 0], [1, 0], [0, -1], [0, 1]]; // Up, Down, Left, Right
+    if (pieceDetails.isKing) { // Dama (King) - Rook-like moves
+      const List<List<int>> directions = [[-1,0],[1,0],[0,-1],[0,1]]; // N, S, W, E
       for (var dir in directions) {
         for (int i = 1; i < 8; i++) {
-          int nextRow = r + dir[0] * i;
-          int nextCol = c + dir[1] * i;
-          if (!_isValidPosition(nextRow, nextCol) || board[nextRow][nextCol] != null) {
-            break; // Blocked or off board
-          }
-          moves.add(BoardPosition(nextRow, nextCol));
+          int toR = piecePos.row + dir[0] * i;
+          int toC = piecePos.col + dir[1] * i;
+          if (!_isValidPosition(toR, toC)) break;
+          int toIndex = rcToIndex(toR, toC);
+          if (!isSet(empty, toIndex)) break; // Blocked
+          moves.add(BoardPosition(toR, toC));
         }
       }
-    } else { // Man (Taş) movement
-      // Forward movement direction depends on piece color
-      int forwardDir = (piece.type == PieceType.black) ? 1 : -1; // Black moves "down" (r increases), Red moves "up" (r decreases)
-
+    } else { // Taş (Man) - Forward or Sideways
+      int forwardRowDelta = (pieceDetails.type == PieceType.black) ? 1 : -1; // Black moves R++, Red moves R--
+      
       // Forward
-      if (_isValidPosition(r + forwardDir, c) && board[r + forwardDir][c] == null) {
-        moves.add(BoardPosition(r + forwardDir, c));
+      int fR = piecePos.row + forwardRowDelta;
+      if (_isValidPosition(fR, piecePos.col) && isSet(empty, rcToIndex(fR, piecePos.col))) {
+        moves.add(BoardPosition(fR, piecePos.col));
       }
       // Sideways Left
-      if (_isValidPosition(r, c - 1) && board[r][c - 1] == null) {
-        moves.add(BoardPosition(r, c - 1));
+      int sLC = piecePos.col - 1;
+      if (_isValidPosition(piecePos.row, sLC) && isSet(empty, rcToIndex(piecePos.row, sLC))) {
+        moves.add(BoardPosition(piecePos.row, sLC));
       }
       // Sideways Right
-      if (_isValidPosition(r, c + 1) && board[r][c + 1] == null) {
-        moves.add(BoardPosition(r, c + 1));
+      int sRC = piecePos.col + 1;
+      if (_isValidPosition(piecePos.row, sRC) && isSet(empty, rcToIndex(piecePos.row, sRC))) {
+        moves.add(BoardPosition(piecePos.row, sRC));
       }
     }
     return moves;
   }
 
-@override
+  @override
   Set<BoardPosition> getJumpMoves(
-      BoardPosition piecePos, Piece piece, List<List<Piece?>> board) {
+      BoardPosition piecePos, Piece pieceDetails, BitboardState currentBoard) {
     Set<BoardPosition> jumps = {};
-    int r = piecePos.row;
-    int c = piecePos.col;
+    final int r = piecePos.row;
+    final int c = piecePos.col;
+    final int fromIndex = rcToIndex(r,c);
+    final int empty = currentBoard.allEmptySquares;
+    final int opponentPieces = (pieceDetails.type == PieceType.black)
+        ? currentBoard.allRedPieces
+        : currentBoard.allBlackPieces;
 
-    if (piece.isKing) { // King (Dama) jump logic (remains the same as your corrected version)
-      const List<List<int>> kingJumpDirections = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-      for (var dir in kingJumpDirections) {
-        BoardPosition? opponentPieceToJumpPos;
-        // Scan along the line to find the first piece to potentially jump
+    const List<List<int>> directions = [[-1,0],[1,0],[0,-1],[0,1]]; // N, S, W, E
+
+    if (pieceDetails.isKing) { // Dama (King) jump
+      for (var dir in directions) {
+        BoardPosition? opponentToJumpPos;
+        // 1. Scan for the first piece along the line
         for (int i = 1; i < 8; i++) {
-          int checkRow = r + dir[0] * i;
-          int checkCol = c + dir[1] * i;
-
-          if (!_isValidPosition(checkRow, checkCol)) break;
-
-          Piece? encounteredPiece = board[checkRow][checkCol];
-          if (encounteredPiece != null) {
-            if (encounteredPiece.type != piece.type) {
-              opponentPieceToJumpPos = BoardPosition(checkRow, checkCol);
+          int checkR = r + dir[0] * i;
+          int checkC = c + dir[1] * i;
+          if (!_isValidPosition(checkR, checkC)) break;
+          
+          int checkIndex = rcToIndex(checkR, checkC);
+          if (isSet(currentBoard.allOccupiedSquares, checkIndex)) { // Found a piece
+            if (isSet(opponentPieces, checkIndex)) { // It's an opponent
+              opponentToJumpPos = BoardPosition(checkR, checkC);
             }
-            break;
+            break; // Stop scan whether friendly or opponent
           }
         }
-
-        if (opponentPieceToJumpPos != null) {
-          for (int j = 1; j < 8; j++) {
-            int landRow = opponentPieceToJumpPos.row + dir[0] * j;
-            int landCol = opponentPieceToJumpPos.col + dir[1] * j;
-            if (!_isValidPosition(landRow, landCol)) break;
-            if (board[landRow][landCol] == null) {
-              jumps.add(BoardPosition(landRow, landCol));
+        // 2. If an opponent was found, scan beyond it for empty landing squares
+        if (opponentToJumpPos != null) {
+          for (int i = 1; i < 8; i++) {
+            int landR = opponentToJumpPos.row + dir[0] * i;
+            int landC = opponentToJumpPos.col + dir[1] * i;
+            if (!_isValidPosition(landR, landC)) break;
+            int landIndex = rcToIndex(landR, landC);
+            if (isSet(empty, landIndex)) {
+              jumps.add(BoardPosition(landR, landC));
             } else {
-              break;
+              break; // Path for landing blocked
             }
           }
         }
       }
-    } else { // Man (Taş) jump logic - MODIFIED FOR NO BACKWARD CAPTURES
-      // piece.moveDirection is -1 for Red (moves up, row decreases), +1 for Black (moves down, row increases)
-      final List<List<int>> manJumpDirections = [
-        [piece.moveDirection, 0], // Forward jump
-        [0, -1],                   // Sideways left jump
-        [0, 1],                    // Sideways right jump
+    } else { // Taş (Man) jump - Forward or Sideways capture only
+      int forwardRowDelta = (pieceDetails.type == PieceType.black) ? 1 : -1;
+      final List<List<int>> manJumpDirs = [
+        [forwardRowDelta, 0], // Forward jump
+        [0, -1],              // Sideways left jump
+        [0, 1],               // Sideways right jump
       ];
 
-      for (var dir in manJumpDirections) {
-        int jumpOverRow = r + dir[0];
-        int jumpOverCol = c + dir[1];
-        int landRow = r + dir[0] * 2;
-        int landCol = c + dir[1] * 2;
+      for (var dir in manJumpDirs) {
+        int jumpOverR = r + dir[0];
+        int jumpOverC = c + dir[1];
+        int landR = r + dir[0] * 2;
+        int landC = c + dir[1] * 2;
 
-        if (_isValidPosition(landRow, landCol) && board[landRow][landCol] == null) {
-          if (_isValidPosition(jumpOverRow, jumpOverCol)) {
-            Piece? jumpedPiece = board[jumpOverRow][jumpOverCol];
-            if (jumpedPiece != null && jumpedPiece.type != piece.type) {
-              jumps.add(BoardPosition(landRow, landCol));
-            }
+        if (_isValidPosition(landR, landC) && isSet(empty, rcToIndex(landR, landC))) {
+          if (_isValidPosition(jumpOverR, jumpOverC) && isSet(opponentPieces, rcToIndex(jumpOverR, jumpOverC))) {
+            jumps.add(BoardPosition(landR, landC));
           }
         }
       }
     }
     return jumps;
   }
+  
+  // Recursive helper for finding all capture sequences for a single piece using bitboards
+  List<FullCaptureSequence> _findAllCaptureSequencesForPieceBitboard(
+    BoardPosition currentPiecePos,
+    Piece piece, // Current state of the piece (type, isKing)
+    BitboardState boardState,
+    PieceType activePlayer,
+    List<BoardPosition> pathTakenSoFar, // Path including currentPiecePos as last
+    int capturesSoFar,
+  ) {
+    List<FullCaptureSequence> allFoundSequences = [];
+    Set<BoardPosition> nextImmediateJumps = getJumpMoves(currentPiecePos, piece, boardState);
 
+    if (nextImmediateJumps.isEmpty) {
+      if (capturesSoFar > 0) {
+        allFoundSequences.add(FullCaptureSequence(
+          initialFromPos: pathTakenSoFar.first,
+          firstStepToPos: pathTakenSoFar[1], // path must have at least initial and first jump
+          fullPath: pathTakenSoFar,
+          numCaptures: capturesSoFar,
+          finalBoardState: boardState,
+        ));
+      }
+    } else {
+      for (BoardPosition nextLandingPos in nextImmediateJumps) {
+        BitboardState boardAfterThisJumpStep = boardState.copy();
+        Piece pieceAfterThisJumpStep = Piece(type: piece.type, isKing: piece.isKing);
+        
+        int fromIdx = rcToIndex(currentPiecePos.row, currentPiecePos.col);
+        int toIdx = rcToIndex(nextLandingPos.row, nextLandingPos.col);
 
+        // 1. Remove original piece from old position
+        if (pieceAfterThisJumpStep.isKing) {
+          if (activePlayer == PieceType.black) boardAfterThisJumpStep.blackKings = clearBit(boardAfterThisJumpStep.blackKings, fromIdx);
+          else boardAfterThisJumpStep.redKings = clearBit(boardAfterThisJumpStep.redKings, fromIdx);
+        } else {
+          if (activePlayer == PieceType.black) boardAfterThisJumpStep.blackMen = clearBit(boardAfterThisJumpStep.blackMen, fromIdx);
+          else boardAfterThisJumpStep.redMen = clearBit(boardAfterThisJumpStep.redMen, fromIdx);
+        }
 
-@override
-MoveResult applyMoveAndGetResult({
-  required List<List<Piece?>> currentBoard,
-  required BoardPosition from,
-  required BoardPosition to,
-  required PieceType currentPlayer,
-}) {
-  List<List<Piece?>> boardCopy = currentBoard.map((row) => List<Piece?>.from(row)).toList();
-  final pieceToMoveInitialState = boardCopy[from.row][from.col];
+        // 2. Determine and remove captured piece
+        BoardPosition capturedPiecePos;
+        if (pieceAfterThisJumpStep.isKing) {
+            int dr = (nextLandingPos.row - currentPiecePos.row).sign;
+            int dc = (nextLandingPos.col - currentPiecePos.col).sign;
+            int checkR = currentPiecePos.row + dr;
+            int checkC = currentPiecePos.col + dc;
+            while(checkR != nextLandingPos.row || checkC != currentPiecePos.col + dc * (nextLandingPos.col - currentPiecePos.col).abs()) { // Iterate up to, but not including, landing spot
+                 if (!_isValidPosition(checkR, checkC)) break; // Should not happen if getJumpMoves was correct
+                 int checkIdx = rcToIndex(checkR, checkC);
+                 if (isSet(boardAfterThisJumpStep.allOccupiedSquares, checkIdx)) { // Found the piece to capture
+                    capturedPiecePos = BoardPosition(checkR, checkC);
+                    // Clear this captured piece from all bitboards
+                    boardAfterThisJumpStep.blackMen = clearBit(boardAfterThisJumpStep.blackMen, checkIdx);
+                    boardAfterThisJumpStep.blackKings = clearBit(boardAfterThisJumpStep.blackKings, checkIdx);
+                    boardAfterThisJumpStep.redMen = clearBit(boardAfterThisJumpStep.redMen, checkIdx);
+                    boardAfterThisJumpStep.redKings = clearBit(boardAfterThisJumpStep.redKings, checkIdx);
+                    break;
+                 }
+                 checkR += dr;
+                 checkC += dc;
+            }
+        } else { // Man captures adjacent
+            capturedPiecePos = BoardPosition(
+                currentPiecePos.row + (nextLandingPos.row - currentPiecePos.row) ~/ 2,
+                currentPiecePos.col + (nextLandingPos.col - currentPiecePos.col) ~/ 2
+            );
+            int capturedIdx = rcToIndex(capturedPiecePos.row, capturedPiecePos.col);
+            boardAfterThisJumpStep.blackMen = clearBit(boardAfterThisJumpStep.blackMen, capturedIdx);
+            boardAfterThisJumpStep.blackKings = clearBit(boardAfterThisJumpStep.blackKings, capturedIdx);
+            boardAfterThisJumpStep.redMen = clearBit(boardAfterThisJumpStep.redMen, capturedIdx);
+            boardAfterThisJumpStep.redKings = clearBit(boardAfterThisJumpStep.redKings, capturedIdx);
+        }
 
-  if (pieceToMoveInitialState == null) {
-    return MoveResult(board: currentBoard, turnChanged: true, pieceKinged: false);
+        // 3. Kinging check
+        bool justKinged = false;
+        if (!pieceAfterThisJumpStep.isKing) {
+          if ((activePlayer == PieceType.black && nextLandingPos.row == 7) ||
+              (activePlayer == PieceType.red && nextLandingPos.row == 0)) {
+            pieceAfterThisJumpStep.isKing = true;
+            justKinged = true;
+          }
+        }
+        
+        // 4. Place the piece (or new king) at landing spot
+        if (pieceAfterThisJumpStep.isKing) {
+          if (activePlayer == PieceType.black) boardAfterThisJumpStep.blackKings = setBit(boardAfterThisJumpStep.blackKings, toIdx);
+          else boardAfterThisJumpStep.redKings = setBit(boardAfterThisJumpStep.redKings, toIdx);
+          if (justKinged && activePlayer == PieceType.black) boardAfterThisJumpStep.blackMen = clearBit(boardAfterThisJumpStep.blackMen, toIdx); // ensure it's not also a man
+          if (justKinged && activePlayer == PieceType.red) boardAfterThisJumpStep.redMen = clearBit(boardAfterThisJumpStep.redMen, toIdx);
+        } else { // Still a man
+          if (activePlayer == PieceType.black) boardAfterThisJumpStep.blackMen = setBit(boardAfterThisJumpStep.blackMen, toIdx);
+          else boardAfterThisJumpStep.redMen = setBit(boardAfterThisJumpStep.redMen, toIdx);
+        }
+
+        List<BoardPosition> nextPath = List.from(pathTakenSoFar)..add(nextLandingPos);
+        allFoundSequences.addAll(_findAllCaptureSequencesForPieceBitboard(
+          nextLandingPos, pieceAfterThisJumpStep, boardAfterThisJumpStep, activePlayer,
+          nextPath, capturesSoFar + 1,
+        ));
+      }
+    }
+    return allFoundSequences;
   }
 
-  Piece pieceInAction = Piece(type: pieceToMoveInitialState.type, isKing: pieceToMoveInitialState.isKing);
-  bool wasActualJumpPerformed = false;
-  bool pieceKingedThisMove = false;
 
-  // Clear the 'from' position on the copy *before* scanning the path for captures
-  boardCopy[from.row][from.col] = null;
+  @override
+  Map<BoardPosition, Set<BoardPosition>> getAllMovesForPlayer(
+    BitboardState currentBoard,
+    PieceType player,
+    bool jumpsOnly, // If true and no jumps, returns empty.
+  ) {
+    List<FullCaptureSequence> allCaptureSequences = [];
+    int playerMen = (player == PieceType.black) ? currentBoard.blackMen : currentBoard.redMen;
+    int playerKings = (player == PieceType.black) ? currentBoard.blackKings : currentBoard.redKings;
 
-  // Determine if a capture occurred and remove the captured piece
-  if (pieceInAction.isKing) {
-    // For a king's move from 'from' to 'to' to be a jump, there must be exactly one
-    // opponent piece on the straight line strictly between 'from' and 'to'.
-    // getJumpMoves should have already validated that 'to' is a valid empty landing square
-    // after such a configuration.
+    for (int i = 0; i < 64; i++) {
+      if (isSet(playerMen, i)) {
+        Piece manDetails = Piece(type: player, isKing: false);
+        BoardPosition fromPos = BoardPosition(indexToRow(i), indexToCol(i));
+        allCaptureSequences.addAll(_findAllCaptureSequencesForPieceBitboard(
+            fromPos, manDetails, currentBoard, player, [fromPos], 0));
+      }
+      if (isSet(playerKings, i)) {
+        Piece kingDetails = Piece(type: player, isKing: true);
+        BoardPosition fromPos = BoardPosition(indexToRow(i), indexToCol(i));
+        allCaptureSequences.addAll(_findAllCaptureSequencesForPieceBitboard(
+            fromPos, kingDetails, currentBoard, player, [fromPos], 0));
+      }
+    }
 
-    int dr = (to.row - from.row).sign; // Direction of move: -1, 0, or 1
-    int dc = (to.col - from.col).sign; // Direction of move: -1, 0, or 1
-
-    BoardPosition? capturedPiecePositionOnPath;
-    int opponentPiecesFoundOnPath = 0;
-    int friendlyPiecesFoundOnPath = 0;
-
-    // Scan squares on the line strictly between 'from' and 'to'
-    int currentRow = from.row + dr;
-    int currentCol = from.col + dc;
-
-    while ((dr != 0 && (dr > 0 ? currentRow < to.row : currentRow > to.row)) || // Moving towards to.row
-           (dc != 0 && (dc > 0 ? currentCol < to.col : currentCol > to.col))) {  // Moving towards to.col
-      if (!_isValidPosition(currentRow, currentCol)) { // Should not happen if 'to' is valid and path is straight
-        break;
+    if (allCaptureSequences.isNotEmpty) {
+      int maxCaptures = 0;
+      for (var seq in allCaptureSequences) {
+        if (seq.numCaptures > maxCaptures) maxCaptures = seq.numCaptures;
       }
 
-      Piece? intermediatePiece = boardCopy[currentRow][currentCol];
-      if (intermediatePiece != null) {
-        if (intermediatePiece.type != pieceInAction.type) { // Opponent piece
-          opponentPiecesFoundOnPath++;
-          if (opponentPiecesFoundOnPath == 1) { // This is the first (and should be only) opponent
-            capturedPiecePositionOnPath = BoardPosition(currentRow, currentCol);
-          } else { // Found a second opponent piece on the path
-            // This implies an invalid jump path (king jumps one piece at a time)
-            // getJumpMoves should ideally prevent this.
-          }
-        } else { // Friendly piece on the path
-          friendlyPiecesFoundOnPath++;
+      if (maxCaptures > 0) { // Only proceed if there are actual captures
+        Map<BoardPosition, Set<BoardPosition>> validFirstSteps = {};
+        List<FullCaptureSequence> maximalSequences = allCaptureSequences
+            .where((seq) => seq.numCaptures == maxCaptures)
+            .toList();
+        
+        for (var seq in maximalSequences) {
+          validFirstSteps
+              .putIfAbsent(seq.initialFromPos, () => <BoardPosition>{})
+              .add(seq.firstStepToPos);
         }
+        return validFirstSteps;
       }
-      currentRow += dr;
-      currentCol += dc;
     }
 
-    // A valid king capture requires exactly one opponent piece and no friendly pieces on the path.
-    if (opponentPiecesFoundOnPath == 1 && friendlyPiecesFoundOnPath == 0 && capturedPiecePositionOnPath != null) {
-      boardCopy[capturedPiecePositionOnPath.row][capturedPiecePositionOnPath.col] = null; // Perform capture
-      wasActualJumpPerformed = true;
+    if (jumpsOnly) return {}; // No jumps found, and only jumps were requested
+
+    // No jumps, or no actual captures found, so find regular moves
+    Map<BoardPosition, Set<BoardPosition>> allRegularMoves = {};
+    for (int i = 0; i < 64; i++) {
+      Piece? pieceDetails = _getPieceDetailsAtIndex(currentBoard, i);
+      if (pieceDetails != null && pieceDetails.type == player) {
+          BoardPosition fromPos = BoardPosition(indexToRow(i), indexToCol(i));
+          Set<BoardPosition> moves = getRegularMoves(fromPos, pieceDetails, currentBoard);
+          if (moves.isNotEmpty) {
+            allRegularMoves[fromPos] = moves;
+          }
+      }
+    }
+    return allRegularMoves;
+  }
+
+  @override
+  MoveResult applyMoveAndGetResult({
+    required BitboardState currentBoard,
+    required BoardPosition from,
+    required BoardPosition to, // 'to' is the first step of a potential multi-jump sequence
+    required PieceType currentPlayer,
+  }) {
+    BitboardState nextBoard = currentBoard.copy();
+    final int fromIndex = rcToIndex(from.row, from.col);
+    final int toIndex = rcToIndex(to.row, to.col);
+
+    Piece? movingPieceInitial = _getPieceDetailsAtIndex(nextBoard, fromIndex);
+    if (movingPieceInitial == null) return MoveResult(board: currentBoard, turnChanged: true);
+
+    Piece pieceInAction = Piece(type: movingPieceInitial.type, isKing: movingPieceInitial.isKing);
+    bool wasActualJumpPerformed = false;
+    bool pieceKingedThisMove = false;
+
+    // 1. Clear piece from original position's specific bitboard
+    if (pieceInAction.isKing) {
+      if (currentPlayer == PieceType.black) nextBoard.blackKings = clearBit(nextBoard.blackKings, fromIndex);
+      else nextBoard.redKings = clearBit(nextBoard.redKings, fromIndex);
+    } else {
+      if (currentPlayer == PieceType.black) nextBoard.blackMen = clearBit(nextBoard.blackMen, fromIndex);
+      else nextBoard.redMen = clearBit(nextBoard.redMen, fromIndex);
     }
 
-  } else { // Man (Taş) capture
-    // A man's jump is always over an adjacent piece, landing 2 squares away.
-    // This is an "extended jump" of exactly 2 squares.
-    if (((to.row - from.row).abs() == 2 && from.col == to.col) || // Vertical jump by 2
-        ((to.col - from.col).abs() == 2 && from.row == to.row)) { // Horizontal jump by 2
-      
-      int capturedRow = from.row + (to.row - from.row) ~/ 2;
-      int capturedCol = from.col + (to.col - from.col) ~/ 2;
-      
-      // What was on the square to be jumped before 'from' was cleared from boardCopy?
-      // We should check against the original currentBoard state for the jumped piece.
-      Piece? pieceThatWasAtCapturedSquare = currentBoard[capturedRow][capturedCol]; 
+    // 2. Determine if this from-to move was a jump and remove captured piece
+    // This requires knowing if 'to' was a jump destination from 'from'.
+    // We infer jump if distance suggests it and intermediate square has opponent.
+    // For Turkish Dama, jumps are orthogonal.
+    int drAbs = (to.row - from.row).abs();
+    int dcAbs = (to.col - from.col).abs();
 
-      if (_isValidPosition(capturedRow, capturedCol) &&
-          pieceThatWasAtCapturedSquare != null &&
-          pieceThatWasAtCapturedSquare.type != pieceInAction.type) {
-        boardCopy[capturedRow][capturedCol] = null; // Capture the piece on the copy
+    if ((drAbs == 2 && dcAbs == 0) || (dcAbs == 2 && drAbs == 0)) { // Man-like jump (2 squares straight)
+      int capturedR = from.row + (to.row - from.row) ~/ 2;
+      int capturedC = from.col + (to.col - from.col) ~/ 2;
+      int capturedIndex = rcToIndex(capturedR, capturedC);
+      Piece? capturedPieceDetails = _getPieceDetailsAtIndex(nextBoard, capturedIndex); // Check before nulling
+      if (capturedPieceDetails != null && capturedPieceDetails.type != currentPlayer) {
+        nextBoard.clearSquare(capturedR, capturedC); // Remove from all bitboards
+        wasActualJumpPerformed = true;
+      }
+    } else if (pieceInAction.isKing && (drAbs > 1 || dcAbs > 1) && (from.row == to.row || from.col == to.col)) { // King extended move
+      // Find the single opponent piece on the line between from and to
+      int drSign = (to.row - from.row).sign;
+      int dcSign = (to.col - from.col).sign;
+      int scanR = from.row + drSign;
+      int scanC = from.col + dcSign;
+      BoardPosition? capturedPiecePosKing;
+      int opponentsOnPath = 0;
+
+      while (scanR != to.row || scanC != to.col) {
+        if (!_isValidPosition(scanR, scanC)) break;
+        Piece? p = _getPieceDetailsAtIndex(nextBoard, rcToIndex(scanR, scanC));
+        if (p != null) {
+          if (p.type != currentPlayer) {
+            opponentsOnPath++;
+            if (opponentsOnPath == 1) capturedPiecePosKing = BoardPosition(scanR, scanC);
+            else { capturedPiecePosKing = null; break; } // More than one piece
+          } else { capturedPiecePosKing = null; break; } // Friendly piece
+        }
+        scanR += drSign;
+        scanC += dcSign;
+      }
+      if (opponentsOnPath == 1 && capturedPiecePosKing != null) {
+        nextBoard.clearSquare(capturedPiecePosKing.row, capturedPiecePosKing.col);
         wasActualJumpPerformed = true;
       }
     }
-  }
 
-  // Place the piece at the 'to' position in the copy
-  boardCopy[to.row][to.col] = pieceInAction;
-
-  // Kinging
-  if (_shouldBecomeKing(to, pieceInAction)) { // Ensure _shouldBecomeKing is defined in this class
-    pieceInAction.isKing = true;
-    pieceKingedThisMove = true;
-  }
-
-  // Determine if turn should change
-  bool turnShouldChange = true;
-  if (wasActualJumpPerformed) {
-    Set<BoardPosition> furtherJumps = getFurtherJumps(to, pieceInAction, boardCopy);
-    if (furtherJumps.isNotEmpty) {
-      turnShouldChange = false; // Multi-jump pending
+    // 3. Kinging
+    bool isNowKing = pieceInAction.isKing;
+    if (!pieceInAction.isKing) {
+      if ((pieceInAction.type == PieceType.black && to.row == 7) ||
+          (pieceInAction.type == PieceType.red && to.row == 0)) {
+        isNowKing = true;
+        pieceKingedThisMove = true;
+      }
     }
-  }
 
-  return MoveResult(
-    board: boardCopy,
-    turnChanged: turnShouldChange,
-    pieceKinged: pieceKingedThisMove,
-  );
-}
+    // 4. Place the piece (or new king) at the destination
+    if (isNowKing) {
+      if (currentPlayer == PieceType.black) nextBoard.blackKings = setBit(nextBoard.blackKings, toIndex);
+      else nextBoard.redKings = setBit(nextBoard.redKings, toIndex);
+    } else { // Still a man
+      if (currentPlayer == PieceType.black) nextBoard.blackMen = setBit(nextBoard.blackMen, toIndex);
+      else nextBoard.redMen = setBit(nextBoard.redMen, toIndex);
+    }
+    
+    // 5. Determine if turn should change
+    bool turnShouldChange = true;
+    if (wasActualJumpPerformed) {
+      Piece currentPieceStateAtTo = Piece(type: currentPlayer, isKing: isNowKing);
+      Set<BoardPosition> furtherJumps = getFurtherJumps(to, currentPieceStateAtTo, nextBoard);
+      if (furtherJumps.isNotEmpty) {
+        turnShouldChange = false;
+      }
+    }
+
+    return MoveResult(
+      board: nextBoard,
+      turnChanged: turnShouldChange,
+      pieceKinged: pieceKingedThisMove,
+    );
+  }
 
   @override
-  Set<BoardPosition> getFurtherJumps(
-      BoardPosition piecePos, Piece piece, List<List<Piece?>> board) {
-    // For Turkish checkers, further jumps are just regular jumps from the new position
-    return getJumpMoves(piecePos, piece, board);
-  }
-
-@override
-  Map<BoardPosition, Set<BoardPosition>> getAllMovesForPlayer(
-    List<List<Piece?>> board,
-    PieceType player,
-    bool jumpsOnly,
-  ) {
-    List<FullCaptureSequence> allPossibleSequences = [];
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        final piece = board[r][c];
-        if (piece != null && piece.type == player) {
-          final piecePos = BoardPosition(r, c);
-          allPossibleSequences.addAll(_findAllCaptureSequencesForPiece(
-            piecePos, piece, board, player,
-            [piecePos], // Path starts with the current piece's original position
-            0,
-          ));
-        }
-      }
-    }
-
-    if (allPossibleSequences.isNotEmpty) {
-      int maxCaptures = 0;
-      for (var seq in allPossibleSequences) {
-        if (seq.numCaptures > maxCaptures) {
-          maxCaptures = seq.numCaptures;
-        }
-      }
-      if (maxCaptures == 0 && jumpsOnly) { // No actual captures were made, even if jumps were explored
-        return {};
-      }
-       if (maxCaptures == 0 && !jumpsOnly) { // No captures, proceed to regular moves if allowed
-          // Fall through to regular move logic below
-       } else { // There are actual capture sequences
-          List<FullCaptureSequence> maximalSequences = allPossibleSequences
-              .where((seq) => seq.numCaptures == maxCaptures && seq.numCaptures > 0) // Ensure actual captures
-              .toList();
-          
-          if (maximalSequences.isNotEmpty) {
-            Map<BoardPosition, Set<BoardPosition>> validFirstStepsOfMaximalJumps = {};
-            for (var seq in maximalSequences) {
-              validFirstStepsOfMaximalJumps
-                  .putIfAbsent(seq.initialFromPos, () => <BoardPosition>{})
-                  .add(seq.firstStepToPos);
-            }
-            return validFirstStepsOfMaximalJumps;
-          }
-          // If somehow maximalSequences is empty but allPossibleSequences was not (e.g. all numCaptures were 0)
-          // then fall through to regular moves if !jumpsOnly
-       }
-    }
-
-    if (jumpsOnly) return {}; // If only jumps were requested and none found (or no actual captures)
-
-    Map<BoardPosition, Set<BoardPosition>> regularMovesMap = {};
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        final piece = board[r][c];
-        if (piece != null && piece.type == player) {
-          final piecePos = BoardPosition(r, c);
-          final moves = getRegularMoves(piecePos, piece, board);
-          if (moves.isNotEmpty) {
-            regularMovesMap[piecePos] = moves;
-          }
-        }
-      }
-    }
-    return regularMovesMap;
-  }
-
-
-
-bool _shouldBecomeKing(BoardPosition pos, Piece piece) {
-    if (piece.isKing) { // Already a king, no change
-      return false;
-    }
-
-    // Assuming Black pieces start at the "top" (e.g., rows 1, 2 in your initial setup)
-    // and move towards row 7 to become a king.
-    if (piece.type == PieceType.black && pos.row == 7) {
-      return true;
-    }
-
-    // Assuming Red pieces start at the "bottom" (e.g., rows 5, 6 in your initial setup)
-    // and move towards row 0 to become a king.
-    if (piece.type == PieceType.red && pos.row == 0) {
-      return true;
-    }
-
-    return false;
-  }
-
-final TurkishCheckersEvaluator _evaluator = TurkishCheckersEvaluator();
-@override
-BoardEvaluator get boardEvaluator => _evaluator;  
-
-@override
   GameStatus checkWinCondition({
-    required List<List<Piece?>> board,
+    required BitboardState currentBoard,
     required PieceType currentPlayer,
-    required Map<BoardPosition, Set<BoardPosition>> allPossibleJumps,
-    required Map<BoardPosition, Set<BoardPosition>> allPossibleRegularMoves,
+    required Map<BoardPosition, Set<BoardPosition>> allPossibleJumpsForCurrentPlayer,
+    required Map<BoardPosition, Set<BoardPosition>> allPossibleRegularMovesForCurrentPlayer,
     required Map<String, int> boardStateCounts,
-    // Make sure this matches GameRules: if movesSinceLastSignificantEvent is commented out there,
-    // it should be commented out here too, or vice-versa.
-    // required int movesSinceLastSignificantEvent, 
   }) {
-    // ---- YOUR IMPLEMENTATION FOR TURKISH CHECKERS WIN/DRAW CONDITIONS ----
-
-    // Example: Check for threefold repetition (same as in StandardCheckersRules)
-    String currentBoardHash = generateBoardStateHash(board, currentPlayer); // Ensure this method is also implemented
+    String currentBoardHash = generateBoardStateHash(currentBoard, currentPlayer);
     if ((boardStateCounts[currentBoardHash] ?? 0) >= 3) {
       return GameStatus.draw(GameEndReason.threefoldRepetition);
     }
 
+    bool hasPieces = (currentPlayer == PieceType.red)
+        ? (currentBoard.allRedPieces != 0)
+        : (currentBoard.allBlackPieces != 0);
 
-    
-
-
-    // Check for no pieces left for the current player
-    bool currentPlayerHasPieces = false;
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        if (board[r][c] != null && board[r][c]!.type == currentPlayer) {
-          currentPlayerHasPieces = true;
-          break;
-        }
-      }
-      if (currentPlayerHasPieces) break;
-    }
-    if (!currentPlayerHasPieces) {
+    if (!hasPieces) {
       return GameStatus.win(
           (currentPlayer == PieceType.red) ? PieceType.black : PieceType.red,
           GameEndReason.noPiecesLeft);
     }
 
-    // Check if current player has any legal moves
-    // (allPossibleJumps and allPossibleRegularMoves are passed in, calculated by GameScreenState)
-    if (allPossibleJumps.isEmpty && allPossibleRegularMoves.isEmpty) {
+    if (allPossibleJumpsForCurrentPlayer.isEmpty && allPossibleRegularMovesForCurrentPlayer.isEmpty) {
       return GameStatus.win(
           (currentPlayer == PieceType.red) ? PieceType.black : PieceType.red,
           GameEndReason.noMovesLeft);
     }
     
-    // TODO: Add any Turkish Checkers specific draw conditions if they exist
-    // (e.g., specific king vs king scenarios, or if you implement a move count rule later)
-
-    return GameStatus.ongoing(); // If no win/loss/draw condition met
-  }
-
-
-@override
-  String generateBoardStateHash(List<List<Piece?>> board, PieceType playerToMove) {
-    StringBuffer sb = StringBuffer();
-    sb.write('${playerToMove.name}:'); // Include whose turn it is in the hash
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        final piece = board[r][c];
-        if (piece == null) {
-          sb.write('E'); // Empty
-        } else {
-          sb.write(piece.type == PieceType.red ? 'R' : 'B');
-          if (piece.isKing) {
-            sb.write('K');
-          }
-        }
-      }
-    }
-    return sb.toString();
+    return GameStatus.ongoing();
   }
 
   @override
-  bool isMaximalCaptureMandatory() => true; // Implemented as false for now
+  bool isMaximalCaptureMandatory() => true; // Turkish Dama has maximal capture
+
+  final TurkishCheckersEvaluator _evaluator = TurkishCheckersEvaluator();
+  @override
+  BoardEvaluator get boardEvaluator => _evaluator;
+  
+  @override
+  String generateBoardStateHash(BitboardState currentBoard, PieceType playerToMove) {
+    // Using the integer values of the bitboards themselves creates a unique hash.
+    // Adding playerToMove ensures different states if board is same but turn differs.
+    return '${playerToMove.name}:'
+           'BM${currentBoard.blackMen}:'
+           'BK${currentBoard.blackKings}:'
+           'RM${currentBoard.redMen}:'
+           'RK${currentBoard.redKings}';
+  }
+  
+  @override
+  Set<BoardPosition> getFurtherJumps(
+    BoardPosition piecePos, // The current position of the piece that just made a jump
+    Piece pieceDetails,     // The current state of that piece (type, and importantly, isKing status)
+    BitboardState currentBoard, // The board state *after* the previous jump and capture
+  ) {
+    // For Turkish Checkers (and standard checkers), the rules for continuing a jump sequence
+    // are the same as making an initial jump from the piece's new position.
+    // The 'pieceDetails' parameter should reflect if the piece was kinged on the previous jump.
+    return getJumpMoves(piecePos, pieceDetails, currentBoard);
+  }
 }

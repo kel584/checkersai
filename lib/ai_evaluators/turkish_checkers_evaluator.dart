@@ -1,395 +1,597 @@
 // lib/ai_evaluators/turkish_checkers_evaluator.dart
 import 'dart:math';
 import '../models/piece_model.dart';
+import '../models/bitboard_state.dart';
+import '../utils/bit_utils.dart';
 import '../game_rules/game_rules.dart';
 import 'board_evaluator.dart';
 
-// Data structure to hold board analysis results from _scanBoard
+class FullCaptureSequence {
+  final BoardPosition initialFromPos;
+  final BoardPosition firstStepToPos;
+  final List<BoardPosition> fullPath;
+  final int numCaptures;
+  final BitboardState finalBoardState;
+
+  FullCaptureSequence({
+    required this.initialFromPos,
+    required this.firstStepToPos,
+    required this.fullPath,
+    required this.numCaptures,
+    required this.finalBoardState,
+  });
+}
+
 class _BoardData {
-  final double materialScoreValue; // Raw material difference
-  final double pstScoreValue;      // Raw PST difference
-  final List<BoardPosition> aiPieces;
-  final List<BoardPosition> opponentPieces;
+  final double materialScore;
+  final double keySquareScore;
+  final double promotionScore;
+  final double clusteringScore;
+  final int aiMenBB;
+  final int aiKingsBB;
+  final int opponentMenBB;
+  final int opponentKingsBB;
   final int totalPieces;
-  final int aiMen;
-  final int aiKings;
-  final int opponentMen;
-  final int opponentKings;
-  final double clusteringScoreValue;
 
   _BoardData({
-    required this.materialScoreValue,
-    required this.pstScoreValue,
-    required this.aiPieces,
-    required this.opponentPieces,
+    required this.materialScore,
+    required this.keySquareScore,
+    required this.promotionScore,
+    required this.clusteringScore,
+    required this.aiMenBB,
+    required this.aiKingsBB,
+    required this.opponentMenBB,
+    required this.opponentKingsBB,
     required this.totalPieces,
-    required this.aiMen,
-    required this.aiKings,
-    required this.opponentMen,
-    required this.opponentKings,
-    required this.clusteringScoreValue
   });
 }
 
 class TurkishCheckersEvaluator implements BoardEvaluator {
   // --- Material Values ---
   static const double _manMaterialBaseValue = 100.0;
-  static const double _kingMaterialBaseValue = 350.0;
+  static const double _kingMaterialBaseValue = 300.0;
 
-  // --- Evaluation Weights (These require careful tuning!) ---
+  // --- Evaluation Weights ---
   static const double _wMaterial = 1.0;
-  static const double _wPst = 0.15; // Adjusted from 0.2
-  static const double _wAdvancedMen = 0.6; 
-  static const double _wMobility = 0.7; // Turkish Dama mobility is key
-  static const double _wKingActivityAndCentralization = 0.4; // Combined weight
-  static const double _wDefenseAndThreats = 0.8; // Combined
-  static const double _wImmediateCaptureOpportunities = 1.2; // High impact
-  static const double _wClustering = 0.1;
-  static const double _wEndgameKingAdvantage = 60.0; // Flat bonus per king difference in endgame
+  static const double _wMobility = 2.0;
+  static const double _wKeySquares = 0.2;
+  static const double _wPromotion = 0.3;
+  static const double _wDefense = 0.25;
+  static const double _wClustering = 0.15;
+  static const double _wThreatDetection = 1.5;
 
-
-  // --- Piece-Square Tables (PSTs) for Turkish Dama ---
-  static const List<List<double>> _turkishManPstForBlack = [
-    [0, 1, 1, 1, 1, 1, 1, 0], [1, 2, 2, 2, 2, 2, 2, 1],
-    [1, 2, 3, 3, 3, 3, 2, 1], [2, 3, 4, 4, 4, 4, 3, 2],
-    [3, 4, 5, 5, 5, 5, 4, 3], [4, 5, 6, 6, 6, 6, 5, 4],
-    [6, 7, 8, 8, 8, 8, 7, 6], [20, 20, 20, 20, 20, 20, 20, 20], // Promotion row bonus (relative to piece value)
-  ];
-  // For Red, we'll flip the row index: _turkishManPstForBlack[7 - r][c]
-
-  static const List<List<double>> _turkishKingPst = [
-    [1, 2, 2, 2, 2, 2, 2, 1], [2, 3, 3, 4, 4, 3, 3, 2],
-    [2, 3, 4, 5, 5, 4, 3, 2], [2, 4, 5, 6, 6, 5, 4, 2],
-    [2, 4, 5, 6, 6, 5, 4, 2], [2, 3, 4, 5, 5, 4, 3, 2],
-    [2, 3, 3, 4, 4, 3, 3, 2], [1, 2, 2, 2, 2, 2, 2, 1],
+  // --- Lookup Tables ---
+  static const Map<int, double> _centerSquareValues = {
+    27: 10.0, 28: 10.0, 35: 10.0, 36: 10.0,
+  };
+  static const Map<int, double> _extendedCenterValues = {
+    18: 5.0, 19: 5.0, 20: 5.0, 21: 5.0,
+    26: 5.0, 29: 5.0,
+    34: 5.0, 37: 5.0,
+    42: 5.0, 43: 5.0, 44: 5.0, 45: 5.0,
+  };
+  static const List<double> _promotionBonuses = [
+    0.0, 2.0, 5.0, 10.0, 18.0, 30.0, 50.0, 150.0
   ];
 
-  bool _isValidPosition(int r, int c) {
+  // --- Precomputed Move Masks ---
+  static final List<int> _blackManMoveMasks = _generateManMoveMasks(1);
+  static final List<int> _redManMoveMasks = _generateManMoveMasks(-1);
+  static final List<int> _kingMoveMasks = _generateKingMoveMasks();
+
+  // --- Bitboard Utilities ---
+  static int indexToRow(int index) => index ~/ 8;
+  static int indexToCol(int index) => index % 8;
+  static int rcToIndex(int row, int col) => row * 8 + col;
+
+  static int countTrailingZeros(int bitboard) {
+    if (bitboard == 0) return -1;
+    int count = 0;
+    while ((bitboard & 1) == 0 && count < 64) {
+      bitboard >>= 1;
+      count++;
+    }
+    return count < 64 ? count : -1;
+  }
+
+  static int popLsb(int bitboard) {
+    return countTrailingZeros(bitboard);
+  }
+
+  static bool _isValidPosition(int r, int c) {
     return r >= 0 && r < 8 && c >= 0 && c < 8;
   }
 
-  _BoardData _scanBoard(List<List<Piece?>> board, PieceType aiPlayerType) {
-    double materialScore = 0;
-    double pstScoreTotal = 0;
-    
-    List<BoardPosition> aiPiecesPos = [];
-    List<BoardPosition> opponentPiecesPos = [];
-    int currentTotalPieces = 0;
-    int currentAiMen = 0, currentAiKings = 0;
-    int currentOpponentMen = 0, currentOpponentKings = 0;
+  static bool _isOccupied(BitboardState board, int idx) {
+    return (board.blackMen | board.blackKings | board.redMen | board.redKings).isSet(idx);
+  }
 
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        final piece = board[r][c];
-        if (piece == null) continue;
-
-        currentTotalPieces++;
-        final currentPos = BoardPosition(r, c);
-        bool isAiPiece = (piece.type == aiPlayerType);
-        double piecePstValue = 0;
-
-        if (piece.isKing) {
-          piecePstValue = _turkishKingPst[r][c];
-          if (isAiPiece) {
-            currentAiKings++;
-            materialScore += _kingMaterialBaseValue;
-            aiPiecesPos.add(currentPos);
-          } else {
-            currentOpponentKings++;
-            materialScore -= _kingMaterialBaseValue;
-            opponentPiecesPos.add(currentPos);
-          }
-        } else { // Man
-          piecePstValue = (piece.type == PieceType.black)
-              ? _turkishManPstForBlack[r][c]
-              : _turkishManPstForBlack[7 - r][c]; // Flip for Red
-          if (isAiPiece) {
-            currentAiMen++;
-            materialScore += _manMaterialBaseValue;
-            aiPiecesPos.add(currentPos);
-          } else {
-            currentOpponentMen++;
-            materialScore -= _manMaterialBaseValue;
-            opponentPiecesPos.add(currentPos);
-          }
-        }
-        if (isAiPiece) {
-            pstScoreTotal += piecePstValue;
-        } else {
-            pstScoreTotal -= piecePstValue; // Subtract opponent's PST
+  static List<int> _generateManMoveMasks(int forwardDir) {
+    List<int> masks = List.filled(64, 0);
+    for (int i = 0; i < 64; i++) {
+      int r = indexToRow(i), c = indexToCol(i);
+      List<List<int>> offsets = [[forwardDir, 0], [0, -1], [0, 1]];
+      for (var d in offsets) {
+        int nr = r + d[0], nc = c + d[1];
+        if (_isValidPosition(nr, nc)) {
+          masks[i] |= 1 << rcToIndex(nr, nc);
         }
       }
     }
-    
-    // Clustering is calculated outside as it needs the full lists of pieces
-    double clusteringScoreVal = _calculateFastClustering(aiPiecesPos, board) - 
-                               _calculateFastClustering(opponentPiecesPos, board);
+    return masks;
+  }
 
-
-    return _BoardData(
-      materialScoreValue: materialScore,
-      pstScoreValue: pstScoreTotal,
-      clusteringScoreValue: clusteringScoreVal,
-      aiPieces: aiPiecesPos,
-      opponentPieces: opponentPiecesPos,
-      totalPieces: currentTotalPieces,
-      aiMen: currentAiMen,
-      aiKings: currentAiKings,
-      opponentMen: currentOpponentMen,
-      opponentKings: currentOpponentKings,
-    );
+  static List<int> _generateKingMoveMasks() {
+    List<int> masks = List.filled(64, 0);
+    for (int i = 0; i < 64; i++) {
+      int r = indexToRow(i), c = indexToCol(i);
+      List<List<int>> directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+      for (var dir in directions) {
+        for (int step = 1; step < 8; step++) {
+          int nr = r + dir[0] * step, nc = c + dir[1] * step;
+          if (!_isValidPosition(nr, nc)) break;
+          masks[i] |= 1 << rcToIndex(nr, nc);
+        }
+      }
+    }
+    return masks;
   }
 
   @override
   double evaluate({
-    required List<List<Piece?>> board,
+    required BitboardState board,
     required PieceType aiPlayerType,
     required GameRules rules,
   }) {
-    final opponentPlayerType = (aiPlayerType == PieceType.red) ? PieceType.black : PieceType.red;
-    final boardData = _scanBoard(board, aiPlayerType);
+    final opponentPlayerType = aiPlayerType.opposite;
+    final boardData = _scanBoard(board, aiPlayerType, opponentPlayerType);
 
     double totalScore = 0;
+    totalScore += boardData.materialScore * _wMaterial;
 
-    totalScore += boardData.materialScoreValue * _wMaterial;
-    totalScore += boardData.pstScoreValue * _wPst;
-    totalScore += boardData.clusteringScoreValue * _wClustering;
-    
-    bool isEndgame = boardData.totalPieces <= 10;
-
-    totalScore += _calculateAdvancedMen(board, aiPlayerType, opponentPlayerType) * _wAdvancedMen;
-    totalScore += _calculateMobility(board, aiPlayerType, opponentPlayerType, rules, boardData.aiPieces, boardData.opponentPieces) * _wMobility;
-    totalScore += _calculateKingActivityAndCentralization(board, aiPlayerType, opponentPlayerType, boardData.aiPieces, boardData.opponentPieces, rules) * _wKingActivityAndCentralization;
-    totalScore += _calculateDefenseAndThreats(board, aiPlayerType, opponentPlayerType, rules, boardData.aiPieces, boardData.opponentPieces) * _wDefenseAndThreats;
-    totalScore += _evaluateImmediateCaptureOpportunities(board, aiPlayerType, opponentPlayerType, rules) * _wImmediateCaptureOpportunities;
-    
-    if (isEndgame) {
-        totalScore += (boardData.aiKings - boardData.opponentKings) * _wEndgameKingAdvantage;
+    if (boardData.totalPieces > 6) {
+      final mobilityScore = _calculateFastMobility(board, aiPlayerType, opponentPlayerType, rules, boardData);
+      totalScore += mobilityScore * _wMobility;
     }
+
+    totalScore += boardData.keySquareScore * _wKeySquares;
+    totalScore += boardData.promotionScore * _wPromotion;
+
+    if (boardData.totalPieces > 8) {
+      final defenseScore = _calculateSimplifiedDefense(board, boardData);
+      totalScore += defenseScore * _wDefense;
+    }
+
+    totalScore += boardData.clusteringScore * _wClustering;
+
+    final threatScore = _detectThreats(board, aiPlayerType, opponentPlayerType, rules);
+    totalScore += threatScore * _wThreatDetection;
 
     return totalScore;
   }
 
-  // --- HELPER EVALUATION METHODS ---
+  double evaluateMove({
+    required BitboardState board,
+    required BoardPosition from,
+    required BoardPosition to,
+    required PieceType aiPlayerType,
+    required GameRules rules,
+  }) {
+    int fromIdx = rcToIndex(from.row, from.col);
+    if (!_isOccupied(board, fromIdx)) return evaluate(board: board, aiPlayerType: aiPlayerType, rules: rules);
 
-  double _calculateAdvancedMen(List<List<Piece?>> board, PieceType aiPlayerType, PieceType opponentPlayerType) {
-    double score = 0;
-    const double advancementMultiplier = 1.0; // Scaled by _wAdvancedMen later
-    const double nearPromotionBonusAbsolute = 15.0; // Direct bonus, not further scaled by weight
+    Piece piece = board.getPieceAt(from.row, from.col)!;
+    BitboardState tempBoard = _copyBoard(board);
+    int toIdx = rcToIndex(to.row, to.col);
 
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        final piece = board[r][c];
-        if (piece != null && !piece.isKing) {
-          int distanceToPromotion;
-          // Black advances from low row index (e.g. 1,2 where they start) to 7
-          // Red advances from high row index (e.g. 5,6 where they start) to 0
-          if (piece.type == PieceType.black) { 
-            distanceToPromotion = 7 - r;
-          } else { 
-            distanceToPromotion = r;
-          }
-          
-          double currentPieceAdvancementBonus = (7 - distanceToPromotion) * advancementMultiplier;
-          if (distanceToPromotion <= 1) { 
-            currentPieceAdvancementBonus += nearPromotionBonusAbsolute; // Correct variable name
-          }
-          
-          if (piece.type == aiPlayerType) {
-            score += currentPieceAdvancementBonus;
-          } else {
-            score -= currentPieceAdvancementBonus; 
-          }
+    // Update bitboards
+    if (piece.type == PieceType.black) {
+      if (piece.isKing) {
+        tempBoard.blackKings &= ~(1 << fromIdx);
+        tempBoard.blackKings |= 1 << toIdx;
+      } else {
+        tempBoard.blackMen &= ~(1 << fromIdx);
+        if (to.row == 7) {
+          tempBoard.blackKings |= 1 << toIdx;
+        } else {
+          tempBoard.blackMen |= 1 << toIdx;
+        }
+      }
+    } else {
+      if (piece.isKing) {
+        tempBoard.redKings &= ~(1 << fromIdx);
+        tempBoard.redKings |= 1 << toIdx;
+      } else {
+        tempBoard.redMen &= ~(1 << fromIdx);
+        if (to.row == 0) {
+          tempBoard.redKings |= 1 << toIdx;
+        } else {
+          tempBoard.redMen |= 1 << toIdx;
         }
       }
     }
+
+    final baseScore = evaluate(board: tempBoard, aiPlayerType: aiPlayerType, rules: rules);
+    final opponentThreatScore = _analyzeOpponentThreats(tempBoard, aiPlayerType.opposite, aiPlayerType, rules);
+    return baseScore + opponentThreatScore;
+  }
+
+  _BoardData _scanBoard(BitboardState board, PieceType aiPlayerType, PieceType opponentPlayerType) {
+    double materialScore = 0;
+    double keySquareScore = 0;
+    double promotionScore = 0;
+    int aiMenBB = aiPlayerType == PieceType.black ? board.blackMen : board.redMen;
+    int aiKingsBB = aiPlayerType == PieceType.black ? board.blackKings : board.redKings;
+    int opponentMenBB = opponentPlayerType == PieceType.black ? board.blackMen : board.redMen;
+    int opponentKingsBB = opponentPlayerType == PieceType.black ? board.blackKings : board.redKings;
+    int totalPieces = (aiMenBB | aiKingsBB | opponentMenBB | opponentKingsBB).countBits();
+
+    int tempAiMen = aiMenBB, tempAiKings = aiKingsBB;
+    int tempOppMen = opponentMenBB, tempOppKings = opponentKingsBB;
+    double aiClustering = 0, oppClustering = 0;
+
+    while (tempAiMen != 0) {
+      int idx = popLsb(tempAiMen);
+      if (idx == -1) break;
+      tempAiMen &= ~(1 << idx);
+      materialScore += _manMaterialBaseValue;
+      keySquareScore += (_centerSquareValues[idx] ?? 0.0) + (_extendedCenterValues[idx] ?? 0.0);
+      int r = indexToRow(idx);
+      int dist = aiPlayerType == PieceType.black ? r : 7 - r;
+      promotionScore += _promotionBonuses[dist];
+      aiClustering += _countAdjacentFriendly(board, idx, aiPlayerType);
+    }
+    while (tempAiKings != 0) {
+      int idx = popLsb(tempAiKings);
+      if (idx == -1) break;
+      tempAiKings &= ~(1 << idx);
+      materialScore += _kingMaterialBaseValue;
+      keySquareScore += (_centerSquareValues[idx] ?? 0.0) + (_extendedCenterValues[idx] ?? 0.0);
+      aiClustering += _countAdjacentFriendly(board, idx, aiPlayerType);
+    }
+    while (tempOppMen != 0) {
+      int idx = popLsb(tempOppMen);
+      if (idx == -1) break;
+      tempOppMen &= ~(1 << idx);
+      materialScore -= _manMaterialBaseValue;
+      keySquareScore -= (_centerSquareValues[idx] ?? 0.0) + (_extendedCenterValues[idx] ?? 0.0);
+      int r = indexToRow(idx);
+      int dist = opponentPlayerType == PieceType.black ? r : 7 - r;
+      promotionScore -= _promotionBonuses[dist];
+      oppClustering += _countAdjacentFriendly(board, idx, opponentPlayerType);
+    }
+    while (tempOppKings != 0) {
+      int idx = popLsb(tempOppKings);
+      if (idx == -1) break;
+      tempOppKings &= ~(1 << idx);
+      materialScore -= _kingMaterialBaseValue;
+      keySquareScore -= (_centerSquareValues[idx] ?? 0.0) + (_extendedCenterValues[idx] ?? 0.0);
+      oppClustering += _countAdjacentFriendly(board, idx, opponentPlayerType);
+    }
+
+    return _BoardData(
+      materialScore: materialScore,
+      keySquareScore: keySquareScore,
+      promotionScore: promotionScore,
+      clusteringScore: aiClustering - oppClustering,
+      aiMenBB: aiMenBB,
+      aiKingsBB: aiKingsBB,
+      opponentMenBB: opponentMenBB,
+      opponentKingsBB: opponentKingsBB,
+      totalPieces: totalPieces,
+    );
+  }
+
+  double _calculateFastMobility(BitboardState board, PieceType aiPlayerType, PieceType opponentPlayerType, GameRules rules, _BoardData boardData) {
+    int aiMoves = 0, oppMoves = 0;
+    int aiBB = boardData.aiMenBB | boardData.aiKingsBB;
+    int oppBB = boardData.opponentMenBB | boardData.opponentKingsBB;
+
+    while (aiBB != 0) {
+      int idx = popLsb(aiBB);
+      if (idx == -1) break;
+      aiBB &= ~(1 << idx);
+      Piece? piece = board.getPieceAt(indexToRow(idx), indexToCol(idx));
+      if (piece != null) {
+        aiMoves += _countQuickMoves(idx, piece, board);
+      }
+    }
+    while (oppBB != 0) {
+      int idx = popLsb(oppBB);
+      if (idx == -1) break;
+      oppBB &= ~(1 << idx);
+      Piece? piece = board.getPieceAt(indexToRow(idx), indexToCol(idx));
+      if (piece != null) {
+        oppMoves += _countQuickMoves(idx, piece, board);
+      }
+    }
+    return (aiMoves - oppMoves).toDouble();
+  }
+
+  int _countQuickMoves(int idx, Piece piece, BitboardState board) {
+    int moves = 0;
+    int occupied = board.blackMen | board.blackKings | board.redMen | board.redKings;
+    if (piece.isKing) {
+      moves += (_kingMoveMasks[idx] & ~occupied).countBits();
+    } else {
+      int moveMask = piece.type == PieceType.black ? _blackManMoveMasks[idx] : _redManMoveMasks[idx];
+      moves += (moveMask & ~occupied).countBits();
+    }
+
+    List<List<int>> jumpDirs = [[2, 0], [-2, 0], [0, 2], [0, -2]];
+    int r = indexToRow(idx), c = indexToCol(idx);
+    for (var d in jumpDirs) {
+      int nr = r + d[0], nc = c + d[1];
+      if (!_isValidPosition(nr, nc)) continue;
+      int jumpIdx = rcToIndex(nr, nc);
+      int midR = (r + nr) ~/ 2, midC = (c + nc) ~/ 2;
+      int midIdx = rcToIndex(midR, midC);
+      if (_isOccupied(board, midIdx) && board.getPieceAt(midR, midC)!.type != piece.type && !_isOccupied(board, jumpIdx)) {
+        moves += 2;
+      }
+    }
+    return moves;
+  }
+
+  double _calculateSimplifiedDefense(BitboardState board, _BoardData boardData) {
+    double score = 0;
+    const double supportBonus = 0.5;
+    int aiSupported = 0, oppSupported = 0;
+
+    int aiBB = boardData.aiMenBB | boardData.aiKingsBB;
+    int oppBB = boardData.opponentMenBB | boardData.opponentKingsBB;
+
+    while (aiBB != 0) {
+      int idx = popLsb(aiBB);
+      if (idx == -1) break;
+      aiBB &= ~(1 << idx);
+      if (_hasAdjacentAlly(board, idx, boardData.aiMenBB | boardData.aiKingsBB)) {
+        aiSupported++;
+      }
+    }
+    while (oppBB != 0) {
+      int idx = popLsb(oppBB);
+      if (idx == -1) break;
+      oppBB &= ~(1 << idx);
+      if (_hasAdjacentAlly(board, idx, boardData.opponentMenBB | boardData.opponentKingsBB)) {
+        oppSupported++;
+      }
+    }
+    score += (aiSupported - oppSupported) * supportBonus;
     return score;
   }
 
-  double _calculateMobility(List<List<Piece?>> board, PieceType aiPlayerType, PieceType opponentPlayerType, GameRules rules, List<BoardPosition> aiPieces, List<BoardPosition> opponentPieces) {
-    int aiTotalMoves = 0;
-    for (final pos in aiPieces) {
-      final piece = board[pos.row][pos.col]!;
-      aiTotalMoves += _countQuickMovesForPiece(pos, piece, board, rules);
-    }
-
-    int opponentTotalMoves = 0;
-    for (final pos in opponentPieces) {
-      final piece = board[pos.row][pos.col]!;
-      opponentTotalMoves += _countQuickMovesForPiece(pos, piece, board, rules);
-    }
-    return (aiTotalMoves - opponentTotalMoves).toDouble();
-  }
-
-  int _countQuickMovesForPiece(BoardPosition pos, Piece piece, List<List<Piece?>> board, GameRules rules) {
-    // This should ideally use rules.getRegularMoves and rules.getJumpMoves for accuracy,
-    // but that's slow. This is a fast approximation for Turkish Dama.
-    int moveCount = 0;
-    if (piece.isKing) {
-      const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-      for (final dir in directions) {
-        for (int i = 1; i < 8; i++) {
-          int r = pos.row + dir[0] * i;
-          int c = pos.col + dir[1] * i;
-          if (!_isValidPosition(r, c) || board[r][c] != null) break;
-          moveCount++;
-        }
+  bool _hasAdjacentAlly(BitboardState board, int idx, int friendlyBB) {
+    int r = indexToRow(idx), c = indexToCol(idx);
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    for (var d in dirs) {
+      int nr = r + d[0], nc = c + d[1];
+      if (_isValidPosition(nr, nc)) {
+        int nIdx = rcToIndex(nr, nc);
+        if (friendlyBB.isSet(nIdx)) return true;
       }
-    } else { // Man (Turkish Dama: forward or sideways non-capturing)
-      int forwardDir = (piece.type == PieceType.black) ? 1 : -1;
-      final manMoveDirs = [[forwardDir, 0], [0, -1], [0, 1]];
-      for (final dir in manMoveDirs) {
-        int r = pos.row + dir[0];
-        int c = pos.col + dir[1];
-        if (_isValidPosition(r, c) && board[r][c] == null) {
-          moveCount++;
-        }
-      }
-    }
-    // Add a small bonus for potential jumps if not too slow
-    Set<BoardPosition> jumps = rules.getJumpMoves(pos, piece, board);
-    moveCount += jumps.length; // Each jump destination counts as mobility
-
-    return moveCount;
-  }
-  
-  double _calculateKingActivityAndCentralization(List<List<Piece?>> board, PieceType aiPlayerType, PieceType opponentPlayerType, List<BoardPosition> aiPieces, List<BoardPosition> opponentPieces, GameRules rules) {
-      double score = 0;
-      for (final pos in aiPieces) {
-          final piece = board[pos.row][pos.col];
-          if (piece != null && piece.isKing) {
-              double r = pos.row.toDouble();
-              double c = pos.col.toDouble();
-              score += (3.5 - (r - 3.5).abs()) + (3.5 - (c - 3.5).abs()); 
-          }
-      }
-      for (final pos in opponentPieces) {
-          final piece = board[pos.row][pos.col];
-           if (piece != null && piece.isKing) {
-              double r = pos.row.toDouble();
-              double c = pos.col.toDouble();
-              score -= (3.5 - (r - 3.5).abs()) + (3.5 - (c - 3.5).abs());
-          }
-      }
-      return score;
-  }
-
-  double _evaluateImmediateCaptureOpportunities(List<List<Piece?>> board, PieceType aiPlayerType, PieceType opponentPlayerType, GameRules rules) {
-      double score = 0;
-      const double captureSequenceBonus = 10.0; // Bonus per piece that can start a capture
-      const double underThreatBySequencePenalty = -12.0;
-
-      Map<BoardPosition, Set<BoardPosition>> aiJumps = rules.getAllMovesForPlayer(board, aiPlayerType, true);
-      if (aiJumps.isNotEmpty) {
-          score += aiJumps.keys.length * captureSequenceBonus;
-      }
-
-      Map<BoardPosition, Set<BoardPosition>> opponentJumps = rules.getAllMovesForPlayer(board, opponentPlayerType, true);
-      if (opponentJumps.isNotEmpty) {
-          score += opponentJumps.keys.length * underThreatBySequencePenalty; 
-      }
-      return score;
-  }
-  
-  double _calculateDefenseAndThreats(List<List<Piece?>> board, PieceType aiPlayerType, PieceType opponentPlayerType, GameRules rules, List<BoardPosition> aiPieces, List<BoardPosition> opponentPieces) {
-      double score = 0;
-      const double supportedPieceBonus = 2.0; // Increased from 0.5
-      const double attackedAndUndefendedPenalty = -60.0; // More severe
-
-      for (final pos in aiPieces) {
-          final piece = board[pos.row][pos.col]!;
-          bool isDefended = _isPieceSupported(board, pos, piece.type);
-          bool isAttacked = _isPieceUnderImmediateJumpThreat(board, pos, piece, opponentPlayerType, rules);
-
-          if (isDefended) score += supportedPieceBonus;
-          if (isAttacked) {
-              score += (isDefended ? attackedAndUndefendedPenalty * 0.6 : attackedAndUndefendedPenalty); // Mitigate if defended
-          }
-      }
-      for (final pos in opponentPieces) {
-          final piece = board[pos.row][pos.col]!;
-          bool isDefended = _isPieceSupported(board, pos, piece.type);
-          bool isAttacked = _isPieceUnderImmediateJumpThreat(board, pos, piece, aiPlayerType, rules);
-
-          if (isDefended) score -= supportedPieceBonus * 0.6; 
-          if (isAttacked) {
-              score -= (isDefended ? (attackedAndUndefendedPenalty * 0.6) : attackedAndUndefendedPenalty); 
-          }
-      }
-      return score;
-  }
-
-  bool _isPieceSupported(List<List<Piece?>> board, BoardPosition piecePos, PieceType friendlyType) {
-    const List<List<int>> DIRS = [[-1,0],[1,0],[0,-1],[0,1]]; // Orthogonal support for Turkish
-    for(var d in DIRS) {
-        int r = piecePos.row + d[0];
-        int c = piecePos.col + d[1];
-        if(_isValidPosition(r,c) && board[r][c]?.type == friendlyType) return true;
     }
     return false;
   }
 
-  bool _isPieceUnderImmediateJumpThreat(List<List<Piece?>> board, BoardPosition targetPos, Piece targetPiece, PieceType attackerType, GameRules rules ) {
-    for (int r = 0; r < 8; r++) {
-      for (int c = 0; c < 8; c++) {
-        final attacker = board[r][c];
-        if (attacker != null && attacker.type == attackerType) {
-          Set<BoardPosition> jumps = rules.getJumpMoves(BoardPosition(r,c), attacker, board);
-          for (final landingPos in jumps) {
-            int jumpedR, jumpedC;
-            if (attacker.isKing) { 
-                int dr = (landingPos.row - r).sign;
-                int dc = (landingPos.col - c).sign;
-                int scanR = r + dr;
-                int scanC = c + dc;
-                bool pieceFoundOnPath = false;
-                while(scanR != landingPos.row || scanC != landingPos.col) {
-                    if (!_isValidPosition(scanR, scanC)) {pieceFoundOnPath=false; break;} // Path blocked or off-board
-                    if (scanR == targetPos.row && scanC == targetPos.col) { 
-                        if(board[scanR][scanC]?.type == targetPiece.type) { // Ensure it's the correct target
-                           pieceFoundOnPath = true; 
-                        } else {
-                           pieceFoundOnPath = false; // Found a piece, but not the target
-                        }
-                        break;
-                    }
-                    if (board[scanR][scanC] != null) {pieceFoundOnPath=false; break;} // Path blocked before target
-                    scanR += dr;
-                    scanC += dc;
-                }
-                if(pieceFoundOnPath) return true;
-            } else { // Man jump
-              jumpedR = r + (landingPos.row - r) ~/ 2;
-              jumpedC = c + (landingPos.col - c) ~/ 2;
-              if (jumpedR == targetPos.row && jumpedC == targetPos.col) {
-                return true;
+  double _calculateFastClustering(BitboardState board, int piecesBB, PieceType type) {
+    if (piecesBB.countBits() <= 1) return 0;
+    double score = 0;
+    int tempBB = piecesBB;
+    while (tempBB != 0) {
+      int idx = popLsb(tempBB);
+      if (idx == -1) break;
+      tempBB &= ~(1 << idx);
+      score += _countAdjacentFriendly(board, idx, type) * 0.5;
+    }
+    return score;
+  }
+
+  double _countAdjacentFriendly(BitboardState board, int idx, PieceType type) {
+    int count = 0;
+    int r = indexToRow(idx), c = indexToCol(idx);
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    for (var d in dirs) {
+      int nr = r + d[0], nc = c + d[1];
+      if (_isValidPosition(nr, nc)) {
+        int nIdx = rcToIndex(nr, nc);
+        if (_isOccupied(board, nIdx) && board.getPieceAt(nr, nc)!.type == type) count++;
+      }
+    }
+    return count * 0.5;
+  }
+
+  double _detectThreats(BitboardState board, PieceType aiPlayerType, PieceType opponentPlayerType, GameRules rules) {
+    double threatScore = 0;
+    const double immediateCaptureBaseBonus = 30.0;
+    const double chainCaptureMultiplier = 1.5;
+
+    List<FullCaptureSequence> aiSequences = _getAllPossibleCaptureSequences(board, aiPlayerType, rules);
+    if (aiSequences.isNotEmpty) {
+      double bestAiCaptureValue = 0;
+      for (var seq in aiSequences) {
+        double value = seq.numCaptures * _manMaterialBaseValue;
+        if (seq.numCaptures > 1) value *= chainCaptureMultiplier;
+        bestAiCaptureValue = max(bestAiCaptureValue, value);
+      }
+      threatScore += immediateCaptureBaseBonus + bestAiCaptureValue;
+    }
+
+    List<FullCaptureSequence> oppSequences = _getAllPossibleCaptureSequences(board, opponentPlayerType, rules);
+    if (oppSequences.isNotEmpty) {
+      double bestOppCaptureValue = 0;
+      for (var seq in oppSequences) {
+        double value = seq.numCaptures * _manMaterialBaseValue;
+        if (seq.numCaptures > 1) value *= chainCaptureMultiplier;
+        bestOppCaptureValue = max(bestOppCaptureValue, value);
+      }
+      threatScore -= (immediateCaptureBaseBonus + bestOppCaptureValue);
+    }
+    return threatScore;
+  }
+
+  List<FullCaptureSequence> _getAllPossibleCaptureSequences(BitboardState board, PieceType player, GameRules rules) {
+    List<FullCaptureSequence> allSequences = [];
+    int piecesBB = player == PieceType.black ? (board.blackMen | board.blackKings) : (board.redMen | board.redKings);
+    while (piecesBB != 0) {
+      int idx = popLsb(piecesBB);
+      if (idx == -1) break;
+      piecesBB &= ~(1 << idx);
+      Piece? piece = board.getPieceAt(indexToRow(idx), indexToCol(idx));
+      if (piece != null) {
+        BoardPosition pos = BoardPosition(indexToRow(idx), indexToCol(idx));
+        allSequences.addAll(_findAllCaptureSequencesForPieceLocal(
+          pos, piece, board, player, [pos], 0, rules));
+      }
+    }
+    return allSequences;
+  }
+
+  List<FullCaptureSequence> _findAllCaptureSequencesForPieceLocal(
+    BoardPosition currentPiecePos,
+    Piece piece,
+    BitboardState boardState,
+    PieceType activePlayer,
+    List<BoardPosition> pathSoFar,
+    int capturesSoFar,
+    GameRules rules,
+  ) {
+    List<FullCaptureSequence> allFoundSequences = [];
+    Set<BoardPosition> nextJumps = rules.getJumpMoves(currentPiecePos, piece, boardState);
+
+    if (nextJumps.isEmpty && capturesSoFar > 0) {
+      allFoundSequences.add(FullCaptureSequence(
+        initialFromPos: pathSoFar.first,
+        firstStepToPos: pathSoFar.length > 1 ? pathSoFar[1] : currentPiecePos,
+        fullPath: pathSoFar,
+        numCaptures: capturesSoFar,
+        finalBoardState: boardState,
+      ));
+      return allFoundSequences;
+    }
+
+    int fromIdx = rcToIndex(currentPiecePos.row, currentPiecePos.col);
+    for (BoardPosition nextPos in nextJumps) {
+      int toIdx = rcToIndex(nextPos.row, nextPos.col);
+      BitboardState nextBoard = _copyBoard(boardState);
+      BoardPosition? capturedPos;
+
+      if (piece.isKing) {
+        int dr = (nextPos.row - currentPiecePos.row).sign;
+        int dc = (nextPos.col - currentPiecePos.col).sign;
+        int checkR = currentPiecePos.row + dr, checkC = currentPiecePos.col + dc;
+        int opponentCount = 0;
+        while (checkR != nextPos.row || checkC != nextPos.col) {
+          if (!_isValidPosition(checkR, checkC)) {
+            capturedPos = null;
+            break;
+          }
+          int idx = rcToIndex(checkR, checkC);
+          if (_isOccupied(nextBoard, idx)) {
+            if (nextBoard.getPieceAt(checkR, checkC)!.type != activePlayer) {
+              opponentCount++;
+              if (opponentCount == 1) capturedPos = BoardPosition(checkR, checkC);
+              else {
+                capturedPos = null;
+                break;
               }
+            } else {
+              capturedPos = null;
+              break;
             }
           }
+          checkR += dr;
+          checkC += dc;
+        }
+        if (opponentCount != 1) capturedPos = null;
+      } else {
+        int capR = (currentPiecePos.row + nextPos.row) ~/ 2;
+        int capC = (currentPiecePos.col + nextPos.col) ~/ 2;
+        capturedPos = BoardPosition(capR, capC);
+      }
+
+      if (capturedPos == null) continue;
+      int capIdx = rcToIndex(capturedPos.row, capturedPos.col);
+      if (!_isOccupied(nextBoard, capIdx) || nextBoard.getPieceAt(capturedPos.row, capturedPos.col)!.type == activePlayer) continue;
+
+      // Update bitboards
+      if (piece.type == PieceType.black) {
+        if (piece.isKing) {
+          nextBoard.blackKings &= ~(1 << fromIdx);
+          nextBoard.blackKings |= 1 << toIdx;
+        } else {
+          nextBoard.blackMen &= ~(1 << fromIdx);
+          if (nextPos.row == 7) {
+            nextBoard.blackKings |= 1 << toIdx;
+          } else {
+            nextBoard.blackMen |= 1 << toIdx;
+          }
+        }
+      } else {
+        if (piece.isKing) {
+          nextBoard.redKings &= ~(1 << fromIdx);
+          nextBoard.redKings |= 1 << toIdx;
+        } else {
+          nextBoard.redMen &= ~(1 << fromIdx);
+          if (nextPos.row == 0) {
+            nextBoard.redKings |= 1 << toIdx;
+          } else {
+            nextBoard.redMen |= 1 << toIdx;
+          }
         }
       }
+
+      // Remove captured piece
+      if (nextBoard.blackMen.isSet(capIdx)) nextBoard.blackMen &= ~(1 << capIdx);
+      else if (nextBoard.blackKings.isSet(capIdx)) nextBoard.blackKings &= ~(1 << capIdx);
+      else if (nextBoard.redMen.isSet(capIdx)) nextBoard.redMen &= ~(1 << capIdx);
+      else if (nextBoard.redKings.isSet(capIdx)) nextBoard.redKings &= ~(1 << capIdx);
+
+      Piece nextPiece = Piece(type: piece.type, isKing: piece.isKing || rules_shouldBecomeKing(nextPos, piece, rules));
+      List<BoardPosition> nextPath = List.from(pathSoFar)..add(nextPos);
+      allFoundSequences.addAll(_findAllCaptureSequencesForPieceLocal(
+        nextPos, nextPiece, nextBoard, activePlayer, nextPath, capturesSoFar + 1, rules));
     }
-    return false;
+    return allFoundSequences;
   }
 
-  double _calculateFastClustering(List<BoardPosition> pieces, List<List<Piece?>> board) {
-    if (pieces.length <= 1) return 0;
-    double score = 0;
-    int adjacentFriendlyOrthogonal = 0;
+  bool rules_shouldBecomeKing(BoardPosition pos, Piece piece, GameRules rules) {
+    if (piece.isKing) return false;
+    return (piece.type == PieceType.black && pos.row == 7) || (piece.type == PieceType.red && pos.row == 0);
+  }
 
-    for (final pos in pieces) {
-      const List<List<int>> DIRS = [[-1,0],[1,0],[0,-1],[0,1]];
-      for(var d in DIRS) {
-        int nr = pos.row + d[0];
-        int nc = pos.col + d[1];
-        if (_isValidPosition(nr, nc) && board[nr][nc] != null && board[nr][nc]!.type == board[pos.row][pos.col]!.type) {
-          adjacentFriendlyOrthogonal++;
-        }
-      }
+  double _analyzeOpponentThreats(BitboardState board, PieceType opponentType, PieceType aiPlayerType, GameRules rules) {
+    double threatValue = 0;
+    List<FullCaptureSequence> oppSequences = _getAllPossibleCaptureSequences(board, opponentType, rules);
+    for (var seq in oppSequences) {
+      threatValue += seq.numCaptures * _manMaterialBaseValue;
     }
-    // Each pair is counted twice if we iterate through all pieces.
-    // Divide by 2 and apply a small bonus for each supporting piece.
-    score += (adjacentFriendlyOrthogonal / 2.0) * 0.5; 
-    return score;
+    return -threatValue;
+  }
+
+  BitboardState _copyBoard(BitboardState board) {
+    return BitboardState(
+      blackMen: board.blackMen,
+      blackKings: board.blackKings,
+      redMen: board.redMen,
+      redKings: board.redKings,
+    );
+  }
+}
+
+// Extensions
+extension PieceTypeExtension on PieceType {
+  PieceType get opposite => this == PieceType.red ? PieceType.black : PieceType.red;
+}
+
+extension BitboardExtension on int {
+  bool isSet(int index) => (this & (1 << index)) != 0;
+  int countBits() {
+    int n = this, count = 0;
+    while (n != 0) {
+      count += n & 1;
+      n >>= 1;
+    }
+    return count;
   }
 }

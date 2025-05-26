@@ -2,9 +2,10 @@
 import '../models/piece_model.dart';
 import 'package:flutter/material.dart';
 import 'square_widget.dart';
+import '../models/bitboard_state.dart';
 
 class BoardWidget extends StatelessWidget {
-  final List<List<Piece?>> boardData;
+  final BitboardState boardData;
   final double boardSize;
   final void Function(int row, int col) onSquareTap;
   final BoardPosition? selectedPiecePosition;
@@ -56,9 +57,7 @@ class BoardWidget extends StatelessWidget {
           }
 
           // Use logicalRow and logicalCol to access boardData and for interactions
-          final piece = (_isValidPosition(logicalRow, logicalCol)) 
-                        ? boardData[logicalRow][logicalCol] 
-                        : null; // Safety check, though index should be within 0-63
+          final Piece? piece = boardData.getPieceAt(logicalRow, logicalCol);
           
           final currentLogicalPosition = BoardPosition(logicalRow, logicalCol);
 
