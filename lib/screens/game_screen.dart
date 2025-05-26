@@ -54,6 +54,7 @@ void aiIsolateEntry(SendPort mainSendPort) async {
       );
       // Pass the BitboardState directly
       final AIMove? bestMove = ai.findBestMove(message.board, message.playerType);
+      print('AI Move Received in GameScreen: $bestMove');
       message.replyPort.send(AIComputeResponse(bestMove));
     }
   }
