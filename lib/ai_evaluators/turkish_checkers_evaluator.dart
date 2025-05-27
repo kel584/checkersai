@@ -32,27 +32,34 @@ class TurkishCheckersEvaluator implements BoardEvaluator {
 
   // Debug flag
   static const bool _enableDebug = false;
+  
+  // Maximum iterations to prevent infinite loops
+  static const int _maxIterations = 64;
 
-    // Fast mobility evaluation
+  // Fast mobility evaluation
   int _fastMobility(int aiPieces, int oppPieces, int emptySquares) {
     var aiMobility = 0;
     var oppMobility = 0;
     
     // Count adjacent empty squares for each piece (simplified mobility)
     var pieces = aiPieces;
-    while (pieces != 0) {
+    var iterations = 0;
+    while (pieces != 0 && iterations < _maxIterations) {
       final sq = lsbIndex(pieces);
       if (sq < 0) break;
       pieces = clearBit(pieces, sq);
       aiMobility += _countAdjacentEmpty(sq, emptySquares);
+      iterations++;
     }
     
     pieces = oppPieces;
-    while (pieces != 0) {
+    iterations = 0;
+    while (pieces != 0 && iterations < _maxIterations) {
       final sq = lsbIndex(pieces);
       if (sq < 0) break;
       pieces = clearBit(pieces, sq);
       oppMobility += _countAdjacentEmpty(sq, emptySquares);
+      iterations++;
     }
     
     return aiMobility - oppMobility;
@@ -172,26 +179,26 @@ class TurkishCheckersEvaluator implements BoardEvaluator {
   }
 
   // Detailed evaluation for middlegame/endgame
-double _detailedEval(BitboardState board, int aiMen, int aiKings, int oppMen, int oppKings, 
-                    bool isBlack, int totalPieces, GameRules rules) {
-  final aiPieces = aiMen | aiKings;
-  final oppPieces = oppMen | oppKings;
-  
-  // Material evaluation
-  var score = (popCount(aiMen) - popCount(oppMen)) * _manValue + 
-              (popCount(aiKings) - popCount(oppKings)) * _kingValue;
+  double _detailedEval(BitboardState board, int aiMen, int aiKings, int oppMen, int oppKings, 
+                      bool isBlack, int totalPieces, GameRules rules) {
+    final aiPieces = aiMen | aiKings;
+    final oppPieces = oppMen | oppKings;
+    
+    // Material evaluation
+    var score = (popCount(aiMen) - popCount(oppMen)) * _manValue + 
+                (popCount(aiKings) - popCount(oppKings)) * _kingValue;
 
-  final isEndgame = totalPieces <= 12;
+    final isEndgame = totalPieces <= 12;
 
-  // Promotion threats (important in endgame)
-  if (isEndgame || totalPieces <= 20) {
-    final promotionThreat = _evaluatePromotionThreats(oppMen, isBlack);
-    score -= promotionThreat * _promotionThreatEg ~/ 100;
-  }
+    // Promotion threats (important in endgame)
+    if (isEndgame || totalPieces <= 20) {
+      final promotionThreat = _evaluatePromotionThreats(oppMen, isBlack);
+      score -= promotionThreat * _promotionThreatEg ~/ 100;
+    }
 
-  // Captures (always important but computed efficiently)
-  final captureScore = _evaluateCaptures(aiPieces, oppPieces, board, isBlack ? PieceType.black : PieceType.red, rules);
-  score += captureScore * _captureBonus ~/ 10;
+    // Captures (always important but computed efficiently)
+    final captureScore = _evaluateCaptures(aiPieces, oppPieces, board, isBlack ? PieceType.black : PieceType.red, rules);
+    score += captureScore * _captureBonus ~/ 10;
 
     // Position evaluation
     final advancementScore = _fastAdvancement(aiMen, isBlack) - _fastAdvancement(oppMen, !isBlack);
@@ -233,48 +240,58 @@ double _detailedEval(BitboardState board, int aiMen, int aiKings, int oppMen, in
     return threat;
   }
 
-int _evaluateCaptures(int aiPieces, int oppPieces, BitboardState board, PieceType aiType, GameRules rules) {
-  var score = 0;
-  
-  // Quick capture threat assessment
-  var pieces = aiPieces;
-  var counter = 0;
-  while (pieces != 0 && counter < 32) {
-    final sq = lsbIndex(pieces);
-    if (sq < 0) break;
-    pieces = clearBit(pieces, sq);
-    counter++;
+  // FIXED: Added proper loop termination and error handling
+  int _evaluateCaptures(int aiPieces, int oppPieces, BitboardState board, PieceType aiType, GameRules rules) {
+    var score = 0;
     
-    score += _countQuickCaptures(sq, board.allEmptySquares, oppPieces);
-  }
-  
-  // Subtract opponent captures
-  pieces = oppPieces;
-  counter = 0;
-  while (pieces != 0 && counter < 32) {
-    final sq = lsbIndex(pieces);
-    if (sq < 0) break;
-    pieces = clearBit(pieces, sq);
-    counter++;
-    
-    score -= _countQuickCaptures(sq, board.allEmptySquares, aiPieces);
-  }
-  
-  // Bonus for multi-jump potential
-  final aiCaptures = rules.getAllMovesForPlayer(board, aiType, true);
-  for (final entry in aiCaptures.entries) {
-    final destinations = entry.value;
-    if (destinations.length > 1) {
-      score += 10 * (destinations.length - 1); // Integer arithmetic
+    // Quick capture threat assessment for AI pieces
+    var pieces = aiPieces;
+    var iterations = 0;
+    while (pieces != 0 && iterations < _maxIterations) {
+      final sq = lsbIndex(pieces);
+      if (sq < 0 || sq >= 64) break; // Additional bounds check
+      
+      pieces = clearBit(pieces, sq);
+      score += _countQuickCaptures(sq, board.allEmptySquares, oppPieces);
+      iterations++;
     }
+    
+    // Subtract opponent captures
+    pieces = oppPieces;
+    iterations = 0;
+    while (pieces != 0 && iterations < _maxIterations) {
+      final sq = lsbIndex(pieces);
+      if (sq < 0 || sq >= 64) break; // Additional bounds check
+      
+      pieces = clearBit(pieces, sq);
+      score -= _countQuickCaptures(sq, board.allEmptySquares, aiPieces);
+      iterations++;
+    }
+    
+    // Bonus for multi-jump potential (with safe error handling)
+    try {
+      final aiCaptures = rules.getAllMovesForPlayer(board, aiType, true);
+      for (final entry in aiCaptures.entries) {
+        final destinations = entry.value;
+        if (destinations.length > 1) {
+          score += 10 * (destinations.length - 1);
+        }
+      }
+    } catch (e) {
+      // Log error but don't crash the evaluation
+      if (_enableDebug) {
+        developer.log('Error in capture evaluation: $e');
+      }
+    }
+    
+    return score;
   }
-  
-  return score;
-}
 
-}
   // Very fast capture counting
   int _countQuickCaptures(int sq, int emptySquares, int targets) {
+    // Bounds check
+    if (sq < 0 || sq >= 64) return 0;
+    
     final r = sq ~/ 8, c = sq % 8;
     var captures = 0;
     
@@ -298,5 +315,4 @@ int _evaluateCaptures(int aiPieces, int oppPieces, BitboardState board, PieceTyp
     
     return captures;  
   }
-
-
+}
